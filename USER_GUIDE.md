@@ -483,3 +483,34 @@ The Grayson tax sale portal (`taxsearch.co.grayson.tx.us:8443`) is DNS NXDOMAIN 
 | `data/current_deals.json` | Full dataset | Source of truth for all deals |
 | `data/deal_memo_*.md` | Deal memos | Review before making offers |
 | `data/offer_letter_*.txt` | Draft offer letters | Edit and send to sellers |
+---
+
+## HITL Comp Intake (turning GATE-VAL failures into passes)
+
+GATE-VAL refuses assessed-value ARVs by design — a real deal only advances
+after a human pulls comps. The intake CLI is that human step:
+
+```bash
+# 1. Pull comps for the parcel (MLS/appraiser) and save as JSON:
+#    [{"address":"...","sale_price":750000,"sale_date":"2026-07-15",
+#      "distance_miles":0.3,"adjusted_price":748000}, ...]
+# 2. Run the gate against the saved CPR:
+python -m src.hitl --cpr data/cpr_4003592.json --comps my_comps.json
+# -> verdict, confidence vs floor, ARV; writes cpr_4003592.valued.json
+```
+
+Tips: ≥3 comps inside 0.5 mi and <180 days old; at appraiser-grade (T3)
+tiers include `adjusted_price` — raw comps cannot clear the floor.
+
+## Dashboard
+
+```bash
+.venv/bin/uvicorn server:app --port 8123   # then open http://127.0.0.1:8123
+```
+KPI cards, sortable deals table, Leaflet map of geocoded notices, portfolio
+stats — all reading the live dataset files on every request.
+
+## Git hooks
+
+Commit-time ruff correctness + naive-utcnow guards; push-time unit tests.
+Hooks are repo-local (`core.hooksPath=.githooks`) — no global install needed.
