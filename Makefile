@@ -2,6 +2,7 @@
 # `make help` lists targets. CI (.github/workflows/ci.yml) runs the same gates.
 
 PY       := .venv/bin/python
+RUFF     := .venv/bin/ruff
 SOFFICE  := /Applications/LibreOffice.app/Contents/MacOS/soffice
 XLSX     := out/HERMES-REO_Model_Suite.xlsx
 
@@ -31,13 +32,13 @@ lock:
 	.venv/bin/pip freeze > requirements-lock.txt
 
 lint:
-	.venv/bin/ruff check --select E9,F63,F7,F82,B006,B017 --src .
+	$(RUFF) check --select E9,F63,F7,F82,B006,B017 .
 
 lint-full:
-	.venv/bin/ruff check --src .
+	$(RUFF) check .
 
 test:
-	$(PY) -m pytest -m "not live and not recalc"
+	$(PY) -m pytest
 
 test-live:
 	$(PY) -m pytest -m live
@@ -52,8 +53,8 @@ build:
 	$(PY) build_workbook.py
 
 recalc: build
-	$(SOFFICE) --headless --calc --convert-to xlsx $(XLSX) --outdir out/recalc/
-	$(PY) -m pytest -m recalc
+	$(SOFFICE) --headless -env:UserInstallation=file:///tmp/lo_hermes --calc --convert-to xlsx $(XLSX) --outdir out/recalc/
+	$(PY) -m pytest test_recalc.py -m recalc
 
 verify: lint test checks fixture build
 	@echo "== verify: ALL GATES GREEN =="
