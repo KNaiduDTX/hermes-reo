@@ -250,3 +250,17 @@ Timezone-aware provenance timestamps (6 sites); M6 deal-type-aware lien-survival
 4. Manual disambiguation queue for the 34 mismatch-cached DCAD parcels
 
 **Final gates:** lint ✓ · 98 tests ✓ · self-checks ✓ · fixture ✓ · workbook ✓ · recalc+8 ✓ · live 3/3 ✓
+
+---
+
+# DATA-QUALITY SWARM — Aug 25, 2026 (final four items)
+| Item | Resolution |
+|---|---|
+| Legacy address quality | ✅ `src/addr.py` normalizer (validated against verbatim dataset garbage) + find_deals plausibility gate — 209/335 rows flagged, fake-equity junk excluded from rankings, dataset schema byte-preserved |
+| Geocode negative-cache | ✅ attempts/TTL ledger (`data/geocode_failures.json`), `--retry-failed` override, normalized outbound queries; batches now advance past permanently failing heads |
+| CI remote | ✅ Workflow validated step-by-step vs current gates; `make ci-local` parity target green end-to-end; `docs/CI_SETUP.md` has exact repo-create/remote/push/protection steps (push itself needs your remote); ruff pinned |
+| 34 mismatch parcels | ✅ Queue exported (`data/dcad_disambiguation_queue.{json,md}`), purge utility verified exact, opt-in `--resolve <addr> [--choice N]` candidate-picker CLI; PLUS verifier rescue (canonical types, nbsp, directional prefixes) replaying prior mismatches as passes while wrong-number protection stays decisive |
+
+**Live re-measure after all fixes:** purge + bounded rerun → +2 CPRs enriched (8 fields); remaining re-fetch failures are genuine wrong-first-result ambiguity → queued for `--resolve`. Cache lifetime: 71 attempted / 26 parsed.
+
+**Gates:** lint ✓ · 171 tests ✓ · self-checks ✓ · fixture ✓ · workbook ✓ · recalc ✓ · live 3/3 ✓ · hooks active ✓
