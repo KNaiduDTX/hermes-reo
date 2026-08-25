@@ -11,6 +11,11 @@ import statistics
 from collections import Counter
 from typing import Optional
 
+from .cpr import CPRColumn, pv_value
+# X7: reuse AGENT-ENR's ISD extraction so portfolio rollups and enrichment can
+# never disagree about how an ISD is derived from taxing-entity strings.
+from .enrichment import extract_isd
+
 
 # --- Known DFW cities (ported from lucid-noether) ---
 
@@ -85,18 +90,27 @@ def portfolio_stats(cprs: list) -> dict:
         if hasattr(cpr, 'situs_address'):
             addr = cpr.situs_address
             city = get_city(addr)
-            owner_name = cpr.owner_name.value if cpr.owner_name else "Unknown"
-            val = cpr.cad_appraised_value.value if cpr.cad_appraised_value else 0.0
-            sqft = cpr.improvement_sqft.value if cpr.improvement_sqft else 0
-            yr = cpr.year_built.value if cpr.year_built else 0
-            ptype = cpr.property_type.value if cpr.property_type else "Unknown"
-            taxing = cpr.jurisdiction_info if hasattr(cpr, 'jurisdiction_info') else ""
-            # Extract ISD from taxing entities
-            isd_match = re.search(r'([A-Za-z0-9\s]+ISD)\b', str(taxing))
-            isd = isd_match.group(1).strip() if isd_match else "Unknown"
+            owner_name = pv_value(cpr.owner_name) if cpr.owner_name else "Unknown"
+            val = pv_value(cpr.cad_appraised_value) if cpr.cad_appraised_value else 0.0
+            sqft = pv_value(cpr.improvement_sqft) if cpr.improvement_sqft else 0
+            yr = pv_value(cpr.year_built) if cpr.year_built else 0
+            ptype = pv_value(cpr.property_type) if cpr.property_type else "Unknown"
+            # X7 fix: CPR has no `jurisdiction_info` attribute — that field only
+            # exists on raw source dicts. ISD comes from the `isd` provenance
+            # field when populated, otherwise it is derived from the taxing-
+            # entity strings (same extraction AGENT-ENR uses at ingestion).
+            taxing = pv_value(getattr(cpr, "taxing_entities", None)) or ""
+            isd = pv_value(getattr(cpr, "isd", None))
+            if not isd or isd == "Unknown":
+                isd = extract_isd(taxing)
             # Debt from liens
             debt = sum(l.amount or 0 for l in cpr.liens if l.lien_type == "mortgage")
             lender = cpr.liens[0].lender if cpr.liens else "Unknown"
+            # X7: trustee distribution covers CPR objects too — pull the
+            # substitute_trustee provenance field instead of leaving the list
+            # empty for every enriched record.
+            trustee = pv_value(getattr(cpr, "substitute_trustee", None)) or "Unknown"
+            trustees.append(trustee)
         else:
             # Raw dict (lucid-noether format)
             addr = cpr.get("property_address", "")
@@ -241,7 +255,6 @@ def weekly_digest(cprs: list, dead_reasons: dict = None) -> str:
     lines.append(f"\nGenerated: {__import__('datetime').datetime.utcnow().isoformat()}")
 
     # Active deals by column
-    from .cpr import CPRColumn
     column_counts = {}
     for cpr in cprs:
         col = cpr.column.value if hasattr(cpr, 'column') else "Unknown"
@@ -311,4 +324,39 @@ if __name__ == "__main__":
     assert "Frisco" in report
     assert "DEBT EXPOSURE" in report
 
+    # X7: real CPR objects — ISD derives from taxing-entity strings when the
+    # `isd` field is missing (the old code read a nonexistent
+    # `jurisdiction_info` attribute, so ISD was always Unknown), and the
+    # trustee distribution now includes enriched records.
+    from .cpr import CPR, ProvenanceField
+
+    def _cpr_with(taxing: str, isd: str | None = None, trustee: str = "") -> CPR:
+        c = CPR(parcel_id="SYN1", county="collin",
+                situs_address="101 Sachse Rd, Sachse, TX 75048")
+        c.set_field("taxing_entities", taxing, "self_check", 0.9)
+        if isd is not None:
+            c.set_field("isd", isd, "manual_override", 1.0)
+        if trustee:
+            c.set_field("substitute_trustee", trustee, "ocr", 0.8)
+        return c
+
+    stats_cpr = portfolio_stats([_cpr_with(
+        "Collin County (GCN) / City of Sachse (CFR) / Wylie ISD (SFR)",
+        trustee="Robert LaMont, Substitute Trustee")])
+    assert stats_cpr["isds"].get("Wylie ISD") == 1, \
+        f"ISD not derived from taxing entities: {stats_cpr['isds']}"
+    assert stats_cpr["trustee_distribution"].get(
+        "Robert LaMont, Substitute Trustee") == 1, \
+        f"trustee distribution missing CPR record: {stats_cpr['trustee_distribution']}"
+
+    # A populated `isd` provenance field wins over re-derivation.
+    stats_isd = portfolio_stats([_cpr_with(
+        "Collin County (GCN) / Frisco ISD (SFR)", isd="Manual ISD Override")])
+    assert stats_isd["isds"] == {"Manual ISD Override": 1}, stats_isd["isds"]
+
+    # No ISD anywhere in the strings -> honest "Unknown", not a crash or guess.
+    stats_none = portfolio_stats([_cpr_with("Dallas County / City of Addison")])
+    assert stats_none["isds"] == {"Unknown": 1}, stats_none["isds"]
+
+    print("synthesis.py: X7 — CPR ISD derivation + trustee distribution verified")
     print("synthesis.py: all self-checks passed")

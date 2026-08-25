@@ -8,19 +8,21 @@ by GATE-LEGAL-WHOLESALE until bilateral disclosure is attached.
 from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import Optional
-from .cpr import CPR, CPRColumn, BlastTier
+from .cpr import CPR, CPRColumn, BlastTier, pv_value
+from .compliance import gate_legal_wholesale
 from .pricing import PricingResult
-from .legal_rules import DealType, WHOLESALE_BILATERAL_DISCLOSURE
+from .legal_rules import DealType
 
 
 # --- Seller postures keyed to distress type ---
+# Playbooks ONLY (framing, messaging, objection handling). The offer ladder —
+# opening/target/walk-away multipliers — is owned by pricing.build_offer_ladder
+# as the single source of truth (audit H3: the duplicated multiplier table that
+# used to live here disagreed with pricing and was never consumed; it is gone).
 
 POSTURES = {
     "DT-PREFORE": {
         "name": "pre-foreclosure",
-        "opening_mult": 0.80,  # aggressive — time pressure on seller
-        "target_mult": 0.95,
-        "walk_away_mult": 1.05,
         "framing": "speed and certainty",
         "key_message": "We can close in 7 days with cash. No repairs needed. You avoid the foreclosure on your record.",
         "objections": {
@@ -31,9 +33,6 @@ POSTURES = {
     },
     "DT-TAXDEED": {
         "name": "tax-delinquent",
-        "opening_mult": 0.75,
-        "target_mult": 0.90,
-        "walk_away_mult": 1.05,
         "framing": "problem-solving, low pressure",
         "key_message": "We can pay your delinquent taxes and put cash in your pocket. You keep your credit clean and avoid a tax foreclosure.",
         "objections": {
@@ -43,9 +42,6 @@ POSTURES = {
     },
     "DT-AUCTION": {
         "name": "pre-auction",
-        "opening_mult": 0.80,
-        "target_mult": 0.95,
-        "walk_away_mult": 1.05,
         "framing": "last chance before sale",
         "key_message": "The auction is days away. Cash now is better than hoping the property doesn't sell for less than you owe.",
         "objections": {
@@ -55,9 +51,6 @@ POSTURES = {
     },
     "DT-REO": {
         "name": "bank-owned",
-        "opening_mult": 0.90,
-        "target_mult": 1.00,
-        "walk_away_mult": 1.05,
         "framing": "condition and DOM leverage",
         "key_message": "We're a cash buyer with no financing contingency. We can close quickly on this REO property.",
         "objections": {
@@ -67,9 +60,6 @@ POSTURES = {
     },
     "DT-SHORT": {
         "name": "short sale",
-        "opening_mult": 0.85,
-        "target_mult": 0.95,
-        "walk_away_mult": 1.05,
         "framing": "patience — lender approval takes time",
         "key_message": "We can make a strong offer to your lender for short-sale approval. You avoid foreclosure and may qualify for deficiency waiver.",
         "objections": {
@@ -126,18 +116,19 @@ def generate_offer(cpr: CPR, pricing: PricingResult) -> OfferPackage:
     closing_days = 7 if deal_type != "DT-SHORT" else 45
     is_cash = deal_type in ("DT-AUCTION", "DT-PREFORE", "DT-REO")
 
-    # Wholesale-specific
+    # Wholesale-specific — GATE-LEGAL-WHOLESALE is the single compliance
+    # authority (X6 fix: the hardcoded block duplicated the gate's statute
+    # citations and could drift from it; now the gate's own verdict/reason is
+    # what blocks the package).
     has_and_or_assigns = (deal_type == "DT-WHOLESALE")
-    disclosure_attached = False  # must be manually attached
-    blocked = False
+    disclosure_attached = False  # must be manually attached by a human
+    wholesale_gate = gate_legal_wholesale(cpr, has_disclosure=disclosure_attached)
+    blocked = wholesale_gate.verdict != "pass"
     block_reason = ""
-
-    if deal_type == "DT-WHOLESALE" and not disclosure_attached:
-        blocked = True
+    if blocked:
         block_reason = (
-            "BLOCKED — bilateral written equitable-interest disclosure required "
-            "(TX Prop. Code §5.0205 / SB 1577, eff. Jan 2024). "
-            "Generate disclosure to BOTH seller and buyer before any contract or marketing."
+            f"BLOCKED — GATE-LEGAL-WHOLESALE {wholesale_gate.verdict.upper()} — "
+            f"{wholesale_gate.reason}"
         )
 
     # Generate offer letter
@@ -219,15 +210,40 @@ class EndBuyer:
     contact: str = ""
 
 
-def match_buyer(cpr: CPR, buyers: list[EndBuyer]) -> list[EndBuyer]:
-    """Match a CPR to end-buyers whose buy-box fits."""
-    # ponytail: simple filter — match county and price range
-    cad = cpr.cad_appraised_value.value if cpr.cad_appraised_value else 0
+def match_buyer(cpr: CPR, buyers: list[EndBuyer], disposition: str = "") -> list[EndBuyer]:
+    """Match a CPR to end-buyers whose buy-box fits.
+
+    D5 fix: the screen price is the GATED ARV when the valuation carries one —
+    buyers buy future value, not the CAD appraisal — falling back to
+    cad_appraised_value, and to 0 when neither exists (a $0 screen matches
+    nobody, which surfaces missing-valuation data instead of faking matches).
+
+    EndBuyer.preference is honored against ``disposition`` when the caller
+    passes one (e.g. "flip" / "rental" / "wholesale"); DT-WHOLESALE CPRs infer
+    disposition "wholesale", because only assignment buyers can take a
+    wholesale deal.
+    """
+    arv = pv_value(cpr.valuation.arv) if (cpr.valuation and cpr.valuation.arv) else None
+    cad = pv_value(cpr.cad_appraised_value) if cpr.cad_appraised_value else None
+    if arv is not None:
+        screen_price = arv
+    elif cad is not None:
+        screen_price = cad
+    else:
+        screen_price = 0  # no valuation data at all → match nobody, loudly
+
+    dt_raw = pv_value(getattr(cpr, "deal_type", "")) or ""
+    inferred = "wholesale" if dt_raw == DealType.WHOLESALE.value else ""
+    want = (disposition or inferred).lower()
+
     matches = []
     for b in buyers:
         if cpr.county in b.counties or "all" in b.counties:
-            if b.buy_box_min <= cad <= b.buy_box_max:
-                matches.append(b)
+            if not (b.buy_box_min <= screen_price <= b.buy_box_max):
+                continue
+            if want and b.preference.lower() != want:
+                continue
+            matches.append(b)
     return matches
 
 
@@ -260,7 +276,7 @@ if __name__ == "__main__":
     assert "cash" in offer.key_message.lower()
     print(f"negotiation.py: flip offer — ${offer.offer_price:,.0f}, posture={offer.seller_posture}")
 
-    # Self-check: wholesale blocked
+    # Self-check: wholesale blocked — by GATE-LEGAL-WHOLESALE's own verdict (X6)
     cpr2 = CPR(parcel_id="test", county="collin",
                situs_address="100 Test St", deal_type="DT-WHOLESALE")
     pricing2 = PricingResult(
@@ -270,9 +286,20 @@ if __name__ == "__main__":
     )
     offer2 = generate_offer(cpr2, pricing2)
     assert offer2.blocked == True
-    assert "bilateral" in offer2.block_reason.lower()
+    assert "GATE-LEGAL-WHOLESALE FAIL" in offer2.block_reason
+    assert "bilateral" in offer2.block_reason.lower()  # gate reason carried through
     assert "BLOCKED" in offer2.offer_letter
-    print(f"negotiation.py: wholesale blocked — {offer2.block_reason[:60]}")
+    print(f"negotiation.py: wholesale blocked via compliance gate — {offer2.block_reason[:70]}")
+
+    # Non-wholesale offers are untouched by the wholesale gate
+    assert offer.blocked == False and offer.compliance_status.startswith("PENDING")
+
+    # Posture playbooks survive; the dead multiplier columns are gone
+    assert "framing" in get_posture("DT-PREFORE")
+    assert not any(
+        k in get_posture(dt) for dt in POSTURES for k in
+        ("opening_mult", "target_mult", "walk_away_mult")
+    ), "dead multiplier table must stay deleted — pricing owns the ladder"
 
     # Self-check: buyer matching — $730K CAD only matches buyer B (400-800K range)
     buyers = [
@@ -283,6 +310,31 @@ if __name__ == "__main__":
     matches = match_buyer(cpr, buyers)
     assert len(matches) == 1  # only B matches ($730K in 400K-800K)
     assert matches[0].name == "Retail Buyer B"
-    print(f"negotiation.py: buyer match — {matches[0].name}")
+    print(f"negotiation.py: buyer match (CAD fallback) — {matches[0].name}")
+
+    # D5: gated ARV drives the screen when present
+    from .cpr import ValuationObject, ProvenanceField as _PF
+    cpr_arv = CPR(parcel_id="4003593", county="collin",
+                  situs_address="101 Plainsman Ln, Frisco, TX 75035",
+                  deal_type="DT-PREFORE")
+    cpr_arv.set_field("cad_appraised_value", 900_000, "collin_cad", 0.90)  # CAD alone → nobody
+    assert match_buyer(cpr_arv, buyers) == []
+    cpr_arv.valuation = ValuationObject(
+        arv=_PF(value=450_000, source="mls_agent", confidence=0.85),
+        comp_source="mls_agent")
+    matches_arv = match_buyer(cpr_arv, buyers)  # ARV 450K fits A (200-500) and B (400-800)
+    assert {m.name for m in matches_arv} == {"Flip Investor A", "Retail Buyer B"}
+
+    # D5: EndBuyer.preference honored against an explicit disposition
+    matches_rental = match_buyer(cpr_arv, buyers, disposition="rental")
+    assert [m.name for m in matches_rental] == ["Retail Buyer B"]
+
+    # D5: wholesale deals infer disposition "wholesale" — only assignment buyers
+    cpr_ws = CPR(parcel_id="ws1", county="collin", situs_address="5 Flip Rd",
+                 deal_type="DT-WHOLESALE")
+    cpr_ws.set_field("cad_appraised_value", 250_000, "collin_cad", 0.9)
+    matches_ws = match_buyer(cpr_ws, buyers)  # price fits A and C; preference keeps C
+    assert [m.name for m in matches_ws] == ["Wholesale C"]
+    print("negotiation.py: D5 — ARV-first screening + preference honoring verified")
 
     print("negotiation.py: all self-checks passed")

@@ -39,12 +39,25 @@ def _parse_bool(val) -> bool:
     return str(val).lower() in ("true", "y", "yes", "1")
 
 
-def _extract_isd(taxing_entities: str) -> str:
+def _homestead_from_taxing(taxing: str) -> bool:
+    """AUDIT C1 fix: token-match the parenthesized exemption code or the
+    whole word HOMESTEAD. The old substring test ('HS' in taxing.upper())
+    flagged e.g. "City of Sachse" (contains the letters h+s) as homestead,
+    silently flipping the redemption class from 180-day/25% to 730-day/50%.
+    """
+    return bool(re.search(r"\(HS\)|\bHOMESTEAD\b", taxing or "", re.IGNORECASE))
+
+
+def extract_isd(taxing_entities: str) -> str:
     """Extract ISD (school district) from taxing entities string."""
     if not taxing_entities:
         return "Unknown"
     m = re.search(r'([A-Za-z0-9\s]+ISD)\b', taxing_entities)
     return m.group(1).strip() if m else "Unknown"
+
+
+# Backwards-compatible alias for the original private name.
+_extract_isd = extract_isd
 
 
 def _enrich_common(cpr: CPR, details: dict, source: str, base_confidence: float):
@@ -86,8 +99,16 @@ def _enrich_common(cpr: CPR, details: dict, source: str, base_confidence: float)
     cpr.set_field("cad_appraised_value_2025", _parse_float(tax.get("Appraised Value (2025)")), source, base_confidence)
     cpr.set_field("cad_tax_year", "2026", source, 1.0)
 
-    # Homestead/ag flags from jurisdiction info
-    cpr.set_field("homestead", "HS" in taxing.upper() or "HOMESTEAD" in taxing.upper(), source, 0.70)
+    # Homestead/ag flags from jurisdiction info.
+    # C1 fix: token-match the parenthesized exemption code or the whole word
+    # HOMESTEAD. Substring matching ("HS" in ...) flagged e.g. "City of
+    # Sachse" (contains the letters h+s) as homestead, silently flipping the
+    # tax-deed redemption class from 180-day/25% to 730-day/50%.
+    cpr.set_field(
+        "homestead",
+        _homestead_from_taxing(taxing),
+        source, 0.70,
+    )
 
     # Census demographics — ALL fields
     if census.get("status") == "Success":
@@ -114,7 +135,9 @@ def _enrich_common(cpr: CPR, details: dict, source: str, base_confidence: float)
                 "status": "Success" if ocr_result.status == "success" else "NoDebt",
             }
 
-    if ocr.get("status") == "Success" or ocr.get("estimated_default_balance", 0) > 0:
+    # None-safe: adapters now correctly emit None (never fabricated zeros) — audit C5/C7
+    debt = ocr.get("estimated_default_balance") or 0
+    if ocr.get("status") == "Success" or debt > 0:
         cpr.set_field("foreclosing_lender", ocr.get("foreclosing_lender", "Unknown"), source, base_confidence)
         cpr.set_field("substitute_trustee", ocr.get("substitute_trustee", "Unknown"), source, base_confidence)
         cpr.set_field("scheduled_sale_time", ocr.get("scheduled_sale_time", "Unknown"), source, base_confidence)
@@ -122,8 +145,7 @@ def _enrich_common(cpr: CPR, details: dict, source: str, base_confidence: float)
         cpr.set_field("unpaid_principal_balance", ocr.get("unpaid_principal_balance"), source, base_confidence)
         cpr.set_field("all_extracted_balances", ocr.get("all_extracted_balances", []), source, base_confidence)
 
-        # Lien: the foreclosing mortgage
-        debt = ocr.get("estimated_default_balance", 0)
+        # Lien: the foreclosing mortgage (None-safe — audit C5)
         if debt > 0:
             cpr.add_lien(LienRecord(
                 lien_type="mortgage",
@@ -136,7 +158,17 @@ def _enrich_common(cpr: CPR, details: dict, source: str, base_confidence: float)
 
     # Distress state
     cpr.deal_type = "DT-AUCTION"
-    cpr.set_field("sale_date", prop.get("Deed Date", "Unknown"), source, base_confidence * 0.8)
+    # X5 fix: Collin's "Deed Date" is the OWNER-ACQUISITION date, not the
+    # foreclosure-sale date. Storing it in sale_date corrupted dedupe keys and
+    # made stale-notice checks compare the wrong event (audit H6). It is now
+    # kept in its own provenance field, owner_deed_date; Collin sale_date
+    # stays unset unless a true foreclosure-sale date ever surfaces. Dallas's
+    # prose date IS the trustee-sale date, so Dallas keeps sale_date.
+    deed_date = prop.get("Deed Date", "Unknown")
+    if (getattr(cpr, "county", "") or "").lower() == "collin":
+        cpr.set_field("owner_deed_date", deed_date, source, base_confidence * 0.8)
+    else:
+        cpr.set_field("sale_date", deed_date, source, base_confidence * 0.8)
 
     return cpr
 
@@ -202,9 +234,9 @@ def enrich_from_dallas_details(lead: NormalizedLead) -> CPR:
 
     _enrich_common(cpr, details, "dallas_foreclosure_pdf", 0.70)
 
-    # DCAD cross-reference: if no improvement data, try DCAD
-    # ponytail: DCAD requires Playwright (browser) — slow, so only run on-demand
-    # not during bulk enrichment. Call cross_reference_dcad(cpr) explicitly.
+    # DCAD cross-reference: if no improvement data, flag for on-demand lookup.
+    # DCAD requires Playwright (browser automation) — slow — so it is never
+    # run during bulk enrichment; call cross_reference_dcad(cpr) explicitly.
     imp = details.get("improvement_info", {})
     if imp.get("Improvement Area") in (None, "Unknown", "") and cpr.situs_address != "Unknown":
         cpr.set_field("dcad_cross_ref_needed", True, "enrichment", 1.0)
@@ -387,6 +419,33 @@ if __name__ == "__main__":
     assert cpr.column == CPRColumn.ENRICHED
     assert len(cpr.ledger) > 20  # many fields set now
 
+    # X5: Collin "Deed Date" is the owner-acquisition date — owner_deed_date,
+    # NOT sale_date (sale_date stays unset so dedupe/timelines stay honest).
+    assert cpr.owner_deed_date.value == "7/25/2013"
+    assert cpr.sale_date is None
+
+    # C1 regression: homestead exemption code must be token-matched.
+    # "City of Sachse" contains the letters h+s — substring matching flagged
+    # Sachse properties homestead, flipping redemption to 730-day/50%.
+    def _homestead_for(taxing: str) -> bool:
+        probe = CPR(parcel_id="probe", county="collin", situs_address="1 Probe St")
+        _enrich_common(probe, {
+            "property_info": {},
+            "jurisdiction_info": {"Taxing Entities": taxing},
+        }, "self_check", 0.9)
+        return probe.homestead.value
+
+    assert _homestead_for(
+        "Collin County (GCN) / City of Sachse (CFR) / Wylie ISD (SFR)") is False, \
+        "Sachse must NOT be flagged homestead"
+    assert _homestead_for("Collin County (GCN) / 1234 Smith HS Rd (CFR)") is False, \
+        "bare HS letters must NOT be flagged homestead"
+    assert _homestead_for("Collin County (GCN) / General Exemption (HS) (AG)") is True, \
+        "(HS) exemption code must be flagged homestead"
+    assert _homestead_for("Tarrant County / HOMESTEAD EXEMPTION ON FILE") is True, \
+        "word HOMESTEAD must be flagged homestead"
+    assert cpr.homestead.value is False  # Frisco fixture has no exemption code
+
     # Test enrich_from_raw_record with Dallas data
     dallas_record = {
         "entry_id": "DAL_March_Addison_1",
@@ -429,6 +488,9 @@ if __name__ == "__main__":
     assert cpr2.census_tract.value == "013628"
     assert cpr2.isd.value == "Unknown"  # Dallas tax entities don't include ISD
     assert cpr2.cad_appraised_value.value == 387000.0
+    # X5: Dallas's prose date IS the trustee-sale date — stays in sale_date.
+    assert cpr2.sale_date.value == "Tuesday, the 3rd day of March, 2026"
+    assert not hasattr(cpr2, "owner_deed_date")  # never fabricated for Dallas
 
     print(f"enrichment.py: Collin — {len(cpr.ledger)} ledger entries (was ~13, now captures all fields)")
     print(f"enrichment.py: Dallas — {len(cpr2.ledger)} ledger entries")

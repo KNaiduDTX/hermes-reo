@@ -62,10 +62,17 @@ def gate_legal_wholesale(cpr: CPR, has_disclosure: bool = False,
 # --- GATE-LEGAL-ELIGIBILITY ---
 
 def gate_legal_eligibility(cpr: CPR, has_written_statement: bool = False,
-                           has_certified_funds: bool = False) -> GateResult:
+                           has_certified_funds: bool = False,
+                           has_realauction_registration: bool = False) -> GateResult:
     """GATE-LEGAL-ELIGIBILITY: auction buyer eligibility.
 
     County-specific pre-bid requirements. Blocks staging a bid until satisfied.
+
+    H5 fix: Dallas's actual requirement is RealAuction.com registration
+    (``has_realauction_registration``) — certified funds alone never
+    satisfied it. Grayson's requirements are documented as TBD, so any
+    Grayson parcel routes to HITL for attorney verification and NEVER
+    auto-passes a requirement nobody has verified.
     """
     county = County(cpr.county) if cpr.county in [c.value for c in County] else None
     if not county:
@@ -73,20 +80,28 @@ def gate_legal_eligibility(cpr: CPR, has_written_statement: bool = False,
                           f"Unknown county: {cpr.county}", {})
 
     req = BUYER_ELIGIBILITY.get(county, {})
-    requirements_met = True
     missing = []
 
     if county == County.COLLIN:
         if not has_written_statement:
-            requirements_met = False
             missing.append("Written Statement ($10, Tax Assessor)")
     elif county == County.DALLAS:
-        # RealAuction registration
+        if not has_realauction_registration:
+            missing.append("RealAuction.com registration (online auction)")
         if not has_certified_funds:
-            requirements_met = False
             missing.append("Certified funds for online auction")
+    elif county == County.GRAYSON:
+        return GateResult(
+            "GATE-LEGAL-ELIGIBILITY", "hitl",
+            "TBD-attorney-verification: Grayson County buyer-eligibility requirements are "
+            f"undocumented ({req.get('requirement', 'verify in WS-00')}) — attorney must "
+            "verify before any bid is staged",
+            {"county": county.value, "requirements": req,
+             "has_written_statement": has_written_statement,
+             "has_certified_funds": has_certified_funds},
+        )
 
-    if not requirements_met:
+    if missing:
         return GateResult("GATE-LEGAL-ELIGIBILITY", "fail",
                           f"Missing requirements: {', '.join(missing)}",
                           {"county": county.value, "missing": missing})
@@ -145,11 +160,26 @@ def gate_legal_redemption(cpr: CPR, deed_recording_date: str = "",
 def gate_legal_lien(cpr: CPR) -> GateResult:
     """GATE-LEGAL-LIEN: title & lien-priority (mandatory before pricing/bidding).
 
-    Requires the encumbrance stack + priority ranking. Flags senior liens
+    FIRST checks cpr.lien_lookup_status (audit S7): a FAILED lien search makes
+    the stack untrustworthy, so the verdict is hitl / "lien-lookup-FAILED"
+    regardless of what happens to be in it — an errored lookup must never be
+    indistinguishable from clean title.
+
+    Then requires the encumbrance stack + priority ranking. Flags senior liens
     surviving a junior foreclosure, property-tax liens surviving a mortgage
     foreclosure, and on tax deeds IRS 120-day / HOA / municipal survival.
     Routes to attorney/title HITL for anything non-trivial.
     """
+    # Contract: errored lookup -> HITL regardless of stack contents
+    lookup_status = getattr(cpr, "lien_lookup_status", "not_run")
+    if lookup_status == "error":
+        return GateResult("GATE-LEGAL-LIEN", "hitl",
+                          "lien-lookup-FAILED — the title/lien search errored; the "
+                          "encumbrance stack is incomplete or untrustworthy. Re-run the "
+                          "search clean before pricing or bidding.",
+                          {"lien_lookup_status": lookup_status,
+                           "lien_count": len(cpr.liens)})
+
     if not cpr.liens:
         return GateResult("GATE-LEGAL-LIEN", "fail",
                           "No lien search performed — mandatory before pricing/bidding",
@@ -185,15 +215,48 @@ def gate_legal_lien(cpr: CPR) -> GateResult:
 
 # --- Run all gates ---
 
-def run_all_gates(cpr: CPR, **kwargs) -> list[GateResult]:
-    """Run all applicable compliance gates on a CPR."""
-    results = []
-    results.append(gate_legal_lien(cpr))
-    results.append(gate_legal_eligibility(cpr, **kwargs))
+# Gate names accepted as keys of run_all_gates' gates_kwargs mapping.
+GATE_NAMES = (
+    "GATE-LEGAL-LIEN",
+    "GATE-LEGAL-ELIGIBILITY",
+    "GATE-LEGAL-WHOLESALE",
+    "GATE-LEGAL-REDEMPTION",
+)
+
+
+def run_all_gates(cpr: CPR, gates_kwargs: dict | None = None) -> list[GateResult]:
+    """Run all applicable compliance gates on a CPR.
+
+    X2 fix: per-gate keyword arguments are passed EXPLICITLY via one
+    ``gates_kwargs`` dict mapping gate name -> that gate's kwarg dict, instead
+    of fanning shared **kwargs into every gate (which crashed with TypeError
+    on any legitimate call). Works with zero arguments; gates absent from the
+    mapping run with their defaults. Unknown gate names raise ValueError —
+    this repo prefers loud failure over silently dropped arguments::
+
+        run_all_gates(cpr, gates_kwargs={
+            "GATE-LEGAL-ELIGIBILITY": {"has_written_statement": True},
+            "GATE-LEGAL-WHOLESALE": {"has_disclosure": True},
+        })
+    """
+    gates_kwargs = gates_kwargs or {}
+    unknown = set(gates_kwargs) - set(GATE_NAMES)
+    if unknown:
+        raise ValueError(
+            f"Unknown gate name(s) {sorted(unknown)} in gates_kwargs; "
+            f"valid gates: {list(GATE_NAMES)}"
+        )
+
+    results = [
+        gate_legal_lien(cpr, **gates_kwargs.get("GATE-LEGAL-LIEN", {})),
+        gate_legal_eligibility(cpr, **gates_kwargs.get("GATE-LEGAL-ELIGIBILITY", {})),
+    ]
     if cpr.deal_type == DealType.WHOLESALE.value:
-        results.append(gate_legal_wholesale(cpr, **kwargs))
+        results.append(gate_legal_wholesale(
+            cpr, **gates_kwargs.get("GATE-LEGAL-WHOLESALE", {})))
     if cpr.deal_type == DealType.TAXDEED.value:
-        results.append(gate_legal_redemption(cpr, **kwargs))
+        results.append(gate_legal_redemption(
+            cpr, **gates_kwargs.get("GATE-LEGAL-REDEMPTION", {})))
     return results
 
 
@@ -239,6 +302,43 @@ if __name__ == "__main__":
     r8 = gate_legal_eligibility(cpr4, has_written_statement=True)
     assert r8.verdict == "pass"
 
+    # H5: Dallas requires RealAuction registration — certified funds alone
+    # never satisfied it.
+    cpr_dal = CPR(parcel_id="test4d", county="dallas", deal_type="DT-AUCTION")
+    r_dal1 = gate_legal_eligibility(cpr_dal, has_certified_funds=True)
+    assert r_dal1.verdict == "fail"
+    assert "RealAuction" in r_dal1.reason
+
+    r_dal2 = gate_legal_eligibility(cpr_dal, has_certified_funds=True,
+                                    has_realauction_registration=True)
+    assert r_dal2.verdict == "pass"
+
+    # H5: Grayson requirements are TBD -> HITL for attorney verification,
+    # NEVER auto-pass, no matter what flags are claimed.
+    cpr_gray = CPR(parcel_id="test4g", county="grayson", deal_type="DT-AUCTION")
+    r_gray = gate_legal_eligibility(cpr_gray, has_written_statement=True,
+                                    has_certified_funds=True,
+                                    has_realauction_registration=True)
+    assert r_gray.verdict == "hitl"
+    assert "TBD-attorney-verification" in r_gray.reason
+    print("compliance.py: H5 — Dallas RealAuction required; Grayson -> HITL (TBD-attorney-verification)")
+
+    # Contract: lien_lookup_status=error -> HITL regardless of stack contents
+    cpr_err = CPR(parcel_id="test_err", county="collin", deal_type="DT-AUCTION")
+    assert cpr_err.lien_lookup_status == "not_run"
+    cpr_err.add_lien(LienRecord(lien_type="mortgage", amount=300_000, priority=1,
+                                survives_foreclosure=False), "clerk")  # would pass alone
+    cpr_err.lien_lookup_status = "error"
+    r_err = gate_legal_lien(cpr_err)
+    assert r_err.verdict == "hitl"
+    assert "lien-lookup-FAILED" in r_err.reason
+    try:
+        cpr_err.lien_lookup_status = "garbage"
+        raise AssertionError("expected ValueError for invalid lien_lookup_status")
+    except ValueError:
+        pass
+    print("compliance.py: S7 — errored lien lookup forces HITL (lien-lookup-FAILED)")
+
     # GATE-LEGAL-REDEMPTION
     cpr5 = CPR(parcel_id="test5", county="dallas", deal_type="DT-TAXDEED")
     cpr5.set_field("homestead", False, "test", 1.0)
@@ -249,5 +349,34 @@ if __name__ == "__main__":
     r10 = gate_legal_redemption(cpr5, making_improvements=True)
     assert r10.verdict == "fail"
     assert "Irreversible" in r10.reason
+
+    # X2: run_all_gates with explicit per-gate kwargs — zero args must work
+    cpr6 = CPR(parcel_id="test6", county="collin", deal_type="DT-AUCTION")
+    results_default = run_all_gates(cpr6)  # no TypeError on zero args anymore
+    assert [g.gate_name for g in results_default] == \
+        ["GATE-LEGAL-LIEN", "GATE-LEGAL-ELIGIBILITY"]
+    assert all(g.verdict in ("pass", "fail", "hitl") for g in results_default)
+
+    # Per-gate kwargs land on exactly their gate
+    cpr7 = CPR(parcel_id="test7", county="collin", deal_type="DT-WHOLESALE")
+    results_kw = run_all_gates(cpr7, gates_kwargs={
+        "GATE-LEGAL-LIEN": {},
+        "GATE-LEGAL-ELIGIBILITY": {"has_written_statement": True},
+        "GATE-LEGAL-WHOLESALE": {"has_disclosure": False, "action": "assign"},
+    })
+    by_name = {g.gate_name: g for g in results_kw}
+    assert set(by_name) == {"GATE-LEGAL-LIEN", "GATE-LEGAL-ELIGIBILITY",
+                            "GATE-LEGAL-WHOLESALE"}
+    assert by_name["GATE-LEGAL-ELIGIBILITY"].verdict == "pass"   # statement supplied
+    assert by_name["GATE-LEGAL-WHOLESALE"].verdict == "fail"     # disclosure missing
+    assert "disclosure" in by_name["GATE-LEGAL-WHOLESALE"].reason.lower()
+
+    # Unknown gate names fail loudly instead of fanning bad kwargs around
+    try:
+        run_all_gates(cpr6, gates_kwargs={"GATE-LEGAL-TYPO": {}})
+        raise AssertionError("expected ValueError for unknown gate name")
+    except ValueError:
+        pass
+    print("compliance.py: X2 — run_all_gates(gates_kwargs=...) explicit per-gate params")
 
     print("compliance.py: all self-checks passed")

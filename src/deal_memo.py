@@ -6,12 +6,120 @@ Render targets: Markdown (agent-native). PDF/XLSX export via skill.
 """
 from __future__ import annotations
 from datetime import datetime
+from typing import TYPE_CHECKING, Optional
 from .cpr import CPR, CPRColumn, BlastTier
+from .dates import parse_date_any
 from .underwriting import UnderwriteResult
-from .pricing import PricingResult, SensitivityCell
+from .pricing import (
+    PricingResult,
+    SensitivityCell,
+    PENCIL_OPTIMISTIC_ONLY,
+    PENCIL_NEVER,
+)
+
+if TYPE_CHECKING:  # avoid a hard runtime dependency on the reviewer module
+    from .reviewer import ReviewResult
 
 
-def render_memo(cpr: CPR, underwrite: UnderwriteResult, pricing: PricingResult) -> str:
+def _unwrap(value, placeholder: str = "—"):
+    """Unwrap ProvenanceField-style objects; None/'' values render as placeholder.
+
+    AUDIT fix: the memo used to print the literal string "None" whenever a
+    ProvenanceField existed but its .value was None (the object itself is
+    truthy). Unknown is now rendered as an em-dash / caller-supplied marker.
+    """
+    v = getattr(value, "value", value)
+    if v is None or v == "":
+        return placeholder
+    return v
+
+
+def recommend_deal(cpr: CPR, underwrite: UnderwriteResult, pricing: PricingResult,
+                   review: Optional["ReviewResult"] = None):
+    """Gate PROCEED on hard evidence. Returns (verdict, blockers, cautions).
+
+    AUDIT C2/C3: PROCEED requires ALL of —
+      * GATE-VAL verdict == "pass"
+      * underwrite net_profit > 0
+      * review.overall == "pass" (reviewer absent → capped at CONDITIONAL)
+      * PricingResult.dead_reason is None
+      * pencil_status != "never_pencils"
+    Any failed requirement is a blocker → DO NOT PROCEED with the first
+    failing reason. Unknown inputs (gate not run, empty sensitivity grid)
+    and optimistic-only pencils are cautions → capped at CONDITIONAL HITL.
+    """
+    blockers: list[str] = []
+    cautions: list[str] = []
+
+    # 1. GATE-VAL
+    gate_verdict = cpr.valuation.gate_val_verdict if cpr.valuation else ""
+    if gate_verdict == "pass":
+        pass
+    elif gate_verdict == "hitl":
+        cautions.append("GATE-VAL verdict 'hitl' — route to MLS/appraiser for a real comp pull")
+    elif gate_verdict == "":
+        cautions.append("GATE-VAL not run — ARV unknown")
+    else:
+        gate_reason = f" — {cpr.valuation.gate_val_reason}" if cpr.valuation else ""
+        blockers.append(f"GATE-VAL failed ('{gate_verdict}'){gate_reason}")
+
+    # 2. Underwriting must actually make money
+    if underwrite.net_profit <= 0:
+        blockers.append(
+            f"Underwrite net profit ${underwrite.net_profit:,.0f} ≤ 0 — deal does not pencil"
+        )
+
+    # 2b. Lien-gate integrity (AUDIT C3 follow-up): an errored lookup or a
+    # surviving tax/IRS/municipal lien must never yield unconditional PROCEED.
+    if getattr(cpr, "lien_lookup_status", "not_run") == "error":
+        blockers.append("Clerk lien lookup FAILED — clean title cannot be asserted")
+    else:
+        surviving = [
+            ln for ln in (cpr.liens or [])
+            if getattr(ln, "survives_foreclosure", False)
+            and getattr(ln, "lien_type", "") in ("tax", "irs_federal", "municipal")
+        ]
+        if surviving:
+            cautions.append(
+                f"{len(surviving)} surviving priority lien(s) "
+                f"(e.g. {surviving[0].lien_type} recorded {surviving[0].recording_date}) — "
+                "title/redemption review required before contract"
+            )
+
+    # 3. Pricing must be alive (AUDIT C2: dead ceiling ⇒ no offer exists)
+    if pricing.dead_reason is not None:
+        blockers.append(
+            f"Pricing dead ({pricing.dead_reason}) — bid ceiling "
+            f"${pricing.bid_ceiling:,.0f} leaves nothing to bid"
+        )
+
+    # 4. Pencil status (AUDIT F12: never_pencils is fatal, optimistic-only is a caution)
+    if pricing.pencil_status == PENCIL_NEVER:
+        blockers.append("Pencil status 'never_pencils' — loses money across the entire ARV/rehab grid")
+    elif pricing.pencil_status == PENCIL_OPTIMISTIC_ONLY or pricing.optimistic_only_flag:
+        cautions.append("Pencil status 'optimistic_only' — only pencils at top of the ARV/rehab grid")
+    elif pricing.pencil_status == "unknown":
+        cautions.append("Pencil status unknown — sensitivity grid is empty")
+
+    # 5. Adversarial review; absent reviewer caps the recommendation
+    if review is not None:
+        overall = getattr(review, "overall", "")
+        if overall != "pass":
+            reasons = list(getattr(review, "rejection_reasons", []) or [])
+            first = reasons[0] if reasons else f"reviewer verdict '{overall or 'unknown'}'"
+            blockers.append(f"AGENT-REV overall '{overall}' — {first}")
+    else:
+        cautions.append("AGENT-REV not run — recommendation capped at CONDITIONAL")
+
+    if blockers:
+        return "DO NOT PROCEED", blockers, cautions
+    if cautions:
+        return "CONDITIONAL", blockers, cautions
+    return "PROCEED", blockers, cautions
+
+
+def render_memo(cpr: CPR, underwrite: UnderwriteResult, pricing: PricingResult,
+                review: Optional["ReviewResult"] = None) -> str:
     """Render a deterministic deal memo in Markdown.
 
     Sections (spec §8):
@@ -25,6 +133,9 @@ def render_memo(cpr: CPR, underwrite: UnderwriteResult, pricing: PricingResult) 
     8. Risk register
     9. Compliance checklist
     10. Recommendation + gate trail
+
+    `review` (optional ReviewResult) feeds the recommendation gate; when it
+    is omitted the recommendation is capped at CONDITIONAL (HITL).
     """
     lines = []
     now = datetime.utcnow().strftime("%Y-%m-%d %H:%M UTC")
@@ -32,7 +143,8 @@ def render_memo(cpr: CPR, underwrite: UnderwriteResult, pricing: PricingResult) 
     # 1. Header
     lines.append(f"# DEAL MEMO — {cpr.parcel_id} — {cpr.situs_address} — {cpr.county.title()} County")
     lines.append(f"**Deal type:** {cpr.deal_type} | **Channel:** {cpr.channel} | **Date:** {now}")
-    sale = cpr.sale_date.value if cpr.sale_date else "N/A"
+    parsed_sale = parse_date_any(_unwrap(cpr.sale_date, None))
+    sale = parsed_sale.isoformat() if parsed_sale else "N/A"
     lines.append(f"**Sale date:** {sale} | **Blast tier:** {cpr.blast_tier.name}")
     lines.append("")
 
@@ -40,9 +152,9 @@ def render_memo(cpr: CPR, underwrite: UnderwriteResult, pricing: PricingResult) 
     lines.append("## Property Snapshot")
     lines.append(f"| Field | Value | Source | Confidence |")
     lines.append(f"|-------|-------|--------|------------|")
-    for label, field in [
+    for label, field_obj in [
         ("Address", cpr.situs_address),
-        ("Legal", cpr.legal_description or "—"),
+        ("Legal", cpr.legal_description),
         ("Type", cpr.property_type),
         ("Sqft", cpr.improvement_sqft),
         ("Beds", cpr.beds),
@@ -50,19 +162,24 @@ def render_memo(cpr: CPR, underwrite: UnderwriteResult, pricing: PricingResult) 
         ("Year Built", cpr.year_built),
         ("Homestead", cpr.homestead),
     ]:
-        if field:
-            v = field.value if hasattr(field, "value") else field
-            s = field.source if hasattr(field, "source") else "—"
-            c = f"{field.confidence:.0%}" if hasattr(field, "confidence") else "—"
-            lines.append(f"| {label} | {v} | {s} | {c} |")
+        v = _unwrap(field_obj, None)
+        if v is None:
+            # Unknown value (missing field, or ProvenanceField(None)) — never
+            # print a literal "None"; show an em-dash row instead.
+            lines.append(f"| {label} | — | — | — |")
+            continue
+        s = _unwrap(getattr(field_obj, "source", None))
+        conf = getattr(field_obj, "confidence", None)
+        c = f"{conf:.0%}" if isinstance(conf, (int, float)) else "—"
+        lines.append(f"| {label} | {v} | {s} | {c} |")
     lines.append("")
 
     # 3. Distress & legal state
     lines.append("## Distress & Legal State")
-    lines.append(f"- **NOD/NOS status:** {cpr.nod_status.value if cpr.nod_status else 'N/A'}")
+    lines.append(f"- **NOD/NOS status:** {_unwrap(cpr.nod_status, 'N/A')}")
     lines.append(f"- **Sale date:** {sale}")
-    lines.append(f"- **Opening/credit bid:** {cpr.opening_bid.value if cpr.opening_bid else 'Unknown'}")
-    lines.append(f"- **Redemption class:** {cpr.redemption_class.value if cpr.redemption_class else 'N/A'}")
+    lines.append(f"- **Opening/credit bid:** {_unwrap(cpr.opening_bid, 'Unknown')}")
+    lines.append(f"- **Redemption class:** {_unwrap(cpr.redemption_class, 'N/A')}")
     lines.append("")
     if cpr.liens:
         lines.append("### Encumbrance Stack")
@@ -80,14 +197,17 @@ def render_memo(cpr: CPR, underwrite: UnderwriteResult, pricing: PricingResult) 
     lines.append("## Valuation")
     if cpr.valuation:
         v = cpr.valuation
-        if v.arv:
-            lines.append(f"- **ARV:** ${v.arv.value:,.0f} (source: {v.arv.source}, confidence: {v.arv.confidence:.0%})")
-        if v.as_is_value:
-            lines.append(f"- **As-is value:** ${v.as_is_value.value:,.0f}")
-        if v.rent_estimate:
-            lines.append(f"- **Rent estimate:** ${v.rent_estimate.value:,.0f}/mo")
-        lines.append(f"- **Comp source:** {v.comp_source}")
-        lines.append(f"- **GATE-VAL verdict:** {v.gate_val_verdict} — {v.gate_val_reason}")
+        arv_val = _unwrap(v.arv, None)
+        as_is_val = _unwrap(v.as_is_value, None)
+        rent_val = _unwrap(v.rent_estimate, None)
+        if arv_val is not None:
+            lines.append(f"- **ARV:** ${arv_val:,.0f} (source: {v.arv.source}, confidence: {v.arv.confidence:.0%})")
+        if as_is_val is not None:
+            lines.append(f"- **As-is value:** ${as_is_val:,.0f}")
+        if rent_val is not None:
+            lines.append(f"- **Rent estimate:** ${rent_val:,.0f}/mo")
+        lines.append(f"- **Comp source:** {v.comp_source or '—'}")
+        lines.append(f"- **GATE-VAL verdict:** {v.gate_val_verdict or 'not run'} — {v.gate_val_reason or '—'}")
         if v.comp_set:
             lines.append(f"- **Comp count:** {len(v.comp_set)}")
     else:
@@ -107,8 +227,10 @@ def render_memo(cpr: CPR, underwrite: UnderwriteResult, pricing: PricingResult) 
     lines.append(f"- **ROI:** {underwrite.roi:.1%}")
     if underwrite.cap_rate is not None:
         lines.append(f"- **Cap rate:** {underwrite.cap_rate:.2%}")
-    if underwrite.cash_on_cash is not None:
+    if underwrite.cash_on_cash is not None:  # AUDIT C3: unknown basis renders as dash below
         lines.append(f"- **Cash-on-cash:** {underwrite.cash_on_cash:.2%}")
+    elif underwrite.model == "rental":
+        lines.append("- **Cash-on-cash:** — (equity basis unknown for financed deal)")
     if underwrite.dscr is not None:
         lines.append(f"- **DSCR:** {underwrite.dscr:.2f}")
     if underwrite.redemption_yield is not None:
@@ -122,17 +244,32 @@ def render_memo(cpr: CPR, underwrite: UnderwriteResult, pricing: PricingResult) 
     lines.append(f"- **MAO:** ${pricing.mao:,.0f}")
     lines.append(f"- **Bid ceiling:** ${pricing.bid_ceiling:,.0f}")
     lines.append(f"- **Blast tier:** {pricing.blast_tier.name}")
-    lad = pricing.offer_ladder
-    lines.append(f"- **Offer ladder:** opening ${lad.get('opening', 0):,.0f} → target ${lad.get('target', 0):,.0f} → walk-away ${lad.get('walk_away', 0):,.0f}")
-    if pricing.optimistic_only_flag:
+    if pricing.dead_reason is not None:
+        # AUDIT C2: dead deal — no offer exists, say so loudly.
+        lines.append(f"- 🚫 **DEAD — {pricing.dead_reason}:** nothing left to bid after "
+                     f"liens/caps; offer withheld (None), no ladder generated.")
+    else:
+        lad = pricing.offer_ladder
+        if pricing.offer is not None:
+            lines.append(f"- **Offer (target):** ${pricing.offer:,.0f}")
+        if lad:
+            lines.append(f"- **Offer ladder:** opening ${lad.get('opening', 0):,.0f} → target ${lad.get('target', 0):,.0f} → walk-away ${lad.get('walk_away', 0):,.0f}")
+    # Pencil status (AUDIT F12): never_pencils renders distinctly from optimistic-only
+    if pricing.pencil_status == PENCIL_NEVER:
+        lines.append("- 🚫 **NEVER PENCILS:** loses money at every point of the ARV/rehab sensitivity grid — this is not a negotiation problem.")
+    elif pricing.pencil_status == PENCIL_OPTIMISTIC_ONLY or pricing.optimistic_only_flag:
         lines.append("- ⚠️ **OPTIMISTIC-ONLY FLAG:** Deal only pencils at top of ARV/rehab sensitivity grid (fake-signal tell)")
+    elif pricing.pencil_status == "unknown":
+        lines.append("- ℹ️ **Pencil status unknown:** sensitivity grid is empty.")
+    else:
+        lines.append("- ✓ Pencils at base assumptions.")
     if pricing.sensitivity:
         lines.append("")
         lines.append("### Sensitivity Grid (ARV × Rehab)")
         lines.append("| ARV Δ | Rehab Δ | Profit | Margin |")
         lines.append("|-------|---------|--------|--------|")
-        for c in pricing.sensitivity:
-            lines.append(f"| {c.arv_delta:+.0%} | {c.rehab_delta:+.0%} | ${c.profit:,.0f} | {c.margin:.1%} |")
+        for cell in pricing.sensitivity:
+            lines.append(f"| {cell.arv_delta:+.0%} | {cell.rehab_delta:+.0%} | ${cell.profit:,.0f} | {cell.margin:.1%} |")
     lines.append("")
 
     # 7. Exit & disposition plan
@@ -161,7 +298,11 @@ def render_memo(cpr: CPR, underwrite: UnderwriteResult, pricing: PricingResult) 
     if cpr.deal_type == "DT-TAXDEED":
         risks.append("No clear title at purchase — quiet-title required post-redemption")
         risks.append("No irreversible improvements during redemption period")
-    if pricing.optimistic_only_flag:
+    if pricing.dead_reason is not None:
+        risks.append(f"Pricing dead ({pricing.dead_reason}) — no offer possible")
+    if pricing.pencil_status == PENCIL_NEVER:
+        risks.append("🚫 Never pencils: unprofitable across the entire ARV/rehab grid")
+    elif pricing.pencil_status == PENCIL_OPTIMISTIC_ONLY or pricing.optimistic_only_flag:
         risks.append("⚠️ Optimistic-only: deal only pencils at optimistic ARV")
     for r in risks:
         lines.append(f"- {r}")
@@ -181,68 +322,143 @@ def render_memo(cpr: CPR, underwrite: UnderwriteResult, pricing: PricingResult) 
 
     # 10. Recommendation + gate trail
     lines.append("## Recommendation")
-    if cpr.valuation and cpr.valuation.gate_val_verdict == "pass" and not pricing.optimistic_only_flag:
-        lines.append(f"**PROCEED** — Valuation gate passed, pricing within bounds.")
-    elif cpr.valuation and cpr.valuation.gate_val_verdict == "hitl":
-        lines.append(f"**HITL** — Route to MLS/appraiser for real comp pull before proceeding.")
+    verdict, blockers, cautions = recommend_deal(cpr, underwrite, pricing, review)
+    if verdict == "DO NOT PROCEED":
+        lines.append(f"**DO NOT PROCEED** — {blockers[0]}")
+        for extra in blockers[1:]:
+            lines.append(f"  - {extra}")
+    elif verdict == "CONDITIONAL":
+        lines.append(f"**CONDITIONAL — HITL REVIEW** — {cautions[0]}")
+        for extra in cautions[1:]:
+            lines.append(f"  - {extra}")
     else:
-        lines.append(f"**DO NOT PROCEED** — Gate failures must be resolved first.")
+        lines.append("**PROCEED** — Valuation gate passed, adversarial review passed, "
+                     "deal pencils at base assumptions, pricing live.")
     lines.append("")
     lines.append("### Gate Trail")
     lines.append(f"- GATE-VAL: {cpr.valuation.gate_val_verdict if cpr.valuation else 'not run'}")
     lines.append(f"- GATE-LEGAL-LIEN: {'not run' if not cpr.liens else 'lien stack present'}")
-    lines.append(f"- AGENT-REV: not run")
+    lines.append(f"- AGENT-REV: {review.overall if review is not None else 'not run'}")
     lines.append(f"- LEGAL-RULES: v1.0 (verified_by: spec_research)")
 
     return "\n".join(lines)
 
 
 if __name__ == "__main__":
-    # Self-check: render a memo from fixture data
+    # Self-check: render memos from fixture data across win/lose/dead scenarios
     from .cpr import CPR, ProvenanceField, LienRecord, ValuationObject, CompRecord, CPRColumn, BlastTier
+    from .reviewer import ReviewResult
     from .underwriting import flip_pnl
-    from .pricing import price_deal
+    from .pricing import PricingResult, SensitivityCell
 
-    cpr = CPR(parcel_id="R4003592", county="collin",
-              situs_address="10022 Plainsman Ln, Frisco, TX 75035",
-              deal_type="DT-AUCTION", channel="foreclosure_notice")
-    cpr.set_field("improvement_sqft", 4332, "collin_cad", 0.95)
-    cpr.set_field("beds", 5, "collin_cad", 0.95)
-    cpr.set_field("baths", 4.0, "collin_cad", 0.95)
-    cpr.set_field("year_built", 2004, "collin_cad", 0.95)
-    cpr.set_field("property_type", "Residential Single Family (A1)", "collin_cad", 0.95)
-    cpr.set_field("cad_appraised_value", 730_673, "collin_cad", 0.90)
-    cpr.set_field("sale_date", "2026-09-01", "collin_foreclosure", 0.80)
-    cpr.add_lien(LienRecord(lien_type="mortgage", amount=350_000, lender="Wells Fargo",
-                            priority=1, survives_foreclosure=False), "collin_clerk")
+    _results = {"pass": 0, "fail": 0}
 
-    cpr.valuation = ValuationObject(
-        arv=ProvenanceField(value=750_000, source="mls_agent", confidence=0.85),
-        comp_source="mls_agent",
-        gate_val_verdict="pass",
-        gate_val_reason="Confidence 0.85 >= floor 0.60",
-        comp_set=[CompRecord(address="comp1", sale_price=740_000, distance_miles=0.3)],
-    )
-    cpr.move_column(CPRColumn.VALUED)
+    def _check(name: str, cond: bool) -> None:
+        _results["pass" if cond else "fail"] += 1
+        print(f"  [{'PASS' if cond else 'FAIL'}] {name}")
+        assert cond, name
 
-    uw = flip_pnl(arv=750_000, purchase=450_000, rehab=50_000,
-                  holding=5_000, financing=10_000, closing_buy=5_000, closing_sell=60_000)
-    pricing = PricingResult(
+    def build_fixture_cpr() -> CPR:
+        cpr = CPR(parcel_id="R4003592", county="collin",
+                  situs_address="10022 Plainsman Ln, Frisco, TX 75035",
+                  deal_type="DT-AUCTION", channel="foreclosure_notice")
+        cpr.set_field("improvement_sqft", 4332, "collin_cad", 0.95)
+        cpr.set_field("beds", 5, "collin_cad", 0.95)
+        cpr.set_field("baths", 4.0, "collin_cad", 0.95)
+        cpr.set_field("year_built", 2004, "collin_cad", 0.95)
+        cpr.set_field("property_type", "Residential Single Family (A1)", "collin_cad", 0.95)
+        cpr.set_field("cad_appraised_value", 730_673, "collin_cad", 0.90)
+        cpr.set_field("sale_date", "2026-09-01", "collin_foreclosure", 0.80)
+        # ProvenanceField(None) — the memo must render an em-dash, not "None"
+        cpr.set_field("homestead", None, "collin_cad", 0.0)
+        cpr.add_lien(LienRecord(lien_type="mortgage", amount=350_000, lender="Wells Fargo",
+                                priority=1, survives_foreclosure=False), "collin_clerk")
+        cpr.valuation = ValuationObject(
+            arv=ProvenanceField(value=750_000, source="mls_agent", confidence=0.85),
+            comp_source="mls_agent",
+            gate_val_verdict="pass",
+            gate_val_reason="Confidence 0.85 >= floor 0.60",
+            comp_set=[CompRecord(address="comp1", sale_price=740_000, distance_miles=0.3)],
+        )
+        cpr.move_column(CPRColumn.VALUED)
+        return cpr
+
+    uw_win = flip_pnl(arv=750_000, purchase=450_000, rehab=50_000,
+                      holding=5_000, financing=10_000, closing_buy=5_000, closing_sell=60_000)
+    pricing_alive = PricingResult(
         deal_type="DT-AUCTION", mao=475_000, bid_ceiling=470_000,
-        offer_ladder={"opening": 404_000, "target": 475_000, "walk_away": 499_000},
+        offer_ladder={"opening": 404_000, "target": 475_000, "walk_away": 470_000},
         blast_tier=BlastTier.T3,
+        pencil_status="base",
         sensitivity=[SensitivityCell(arv_delta=0.0, rehab_delta=0.0, profit=100_000, margin=0.13)],
     )
+    review_pass = ReviewResult(overall="pass")
 
-    memo = render_memo(cpr, uw, pricing)
-    assert "DEAL MEMO" in memo
-    assert "10022 Plainsman" in memo
-    assert "GATE-VAL" in memo
-    assert "MAO" in memo
-    assert "Sensitivity" in memo
-    assert "Risk Register" in memo
-    assert "Compliance" in memo
-    assert "PROCEED" in memo or "HITL" in memo or "DO NOT PROCEED" in memo
+    # --- Scenario 1: winning deal + full gates -> PROCEED ---
+    memo = render_memo(build_fixture_cpr(), uw_win, pricing_alive, review_pass)
+    _check("memo has header/address", "DEAL MEMO" in memo and "10022 Plainsman" in memo)
+    _check("valuation section present", "GATE-VAL" in memo)
+    _check("pricing section present", "MAO" in memo)
+    _check("sensitivity grid present", "Sensitivity" in memo)
+    _check("risk register present", "Risk Register" in memo)
+    _check("compliance checklist present", "Compliance" in memo)
+    _check("winning deal prints **PROCEED**", "**PROCEED**" in memo)
+    _check("winning deal does NOT print DO NOT PROCEED", "DO NOT PROCEED" not in memo)
+    _check("no literal 'None' rendered anywhere (ProvenanceField(None) fix)",
+           "None" not in memo)
+    _check("unset homestead renders em-dash row", "| Homestead | — | — | — |" in memo)
+    _check("sale date parsed to ISO via parse_date_any", "2026-09-01" in memo)
+    _check("gate trail shows AGENT-REV pass", "- AGENT-REV: pass" in memo)
 
-    print(f"deal_memo.py: rendered {len(memo)} chars")
+    # --- Scenario 2: losing underwrite -> DO NOT PROCEED with reason ---
+    uw_loss = flip_pnl(arv=750_000, purchase=700_000, rehab=50_000,
+                       holding=5_000, financing=10_000, closing_buy=5_000, closing_sell=60_000)
+    memo_loss = render_memo(build_fixture_cpr(), uw_loss, pricing_alive, review_pass)
+    _check("losing deal prints **DO NOT PROCEED**", "**DO NOT PROCEED**" in memo_loss)
+    _check("losing deal cites non-positive net profit",
+           "net profit $" in memo_loss and "does not pencil" in memo_loss)
+    _check("losing deal does NOT print bare PROCEED verdict", "\n**PROCEED**" not in memo_loss)
+
+    # --- Scenario 3: dead pricing (C2) -> DO NOT PROCEED, distinct from loss ---
+    pricing_dead = PricingResult(
+        deal_type="DT-AUCTION", mao=475_000, bid_ceiling=0,
+        offer=None, offer_ladder={},
+        blast_tier=BlastTier.T3,
+        pencil_status=PENCIL_NEVER,
+        dead_reason="bid_ceiling_nonpositive",
+        sensitivity=[],
+    )
+    memo_dead = render_memo(build_fixture_cpr(), uw_win, pricing_dead, review_pass)
+    _check("dead-pricing deal prints **DO NOT PROCEED**", "**DO NOT PROCEED**" in memo_dead)
+    _check("dead reason surfaced (bid_ceiling_nonpositive)",
+           "bid_ceiling_nonpositive" in memo_dead)
+    _check("never_pencils rendered distinctly", "NEVER PENCILS" in memo_dead)
+
+    # --- Scenario 4: optimistic-only renders distinctly from never_pencils ---
+    pricing_opt = PricingResult(
+        deal_type="DT-AUCTION", mao=475_000, bid_ceiling=470_000,
+        offer_ladder={"opening": 404_000, "target": 475_000, "walk_away": 470_000},
+        blast_tier=BlastTier.T3,
+        pencil_status="optimistic_only",
+        sensitivity=[SensitivityCell(arv_delta=0.10, rehab_delta=-0.10, profit=12_000, margin=0.05)],
+    )
+    memo_opt = render_memo(build_fixture_cpr(), uw_win, pricing_opt, review_pass)
+    _check("optimistic-only flag line rendered", "OPTIMISTIC-ONLY FLAG" in memo_opt)
+    _check("optimistic-only does not claim NEVER PENCILS", "NEVER PENCILS" not in memo_opt)
+    _check("optimistic-only caps at CONDITIONAL even when review passed",
+           "**CONDITIONAL — HITL REVIEW**" in memo_opt)
+
+    # --- Scenario 5: reviewer absent -> capped at CONDITIONAL ---
+    memo_norev = render_memo(build_fixture_cpr(), uw_win, pricing_alive)
+    _check("absent reviewer caps recommendation at CONDITIONAL",
+           "**CONDITIONAL — HITL REVIEW**" in memo_norev)
+    _check("no PROCEED verdict without reviewer sign-off", "\n**PROCEED**" not in memo_norev)
+    _check("gate trail shows AGENT-REV not run", "- AGENT-REV: not run" in memo_norev)
+
+    # --- Scenario 6: legacy positional call signature still works ---
+    memo_legacy = render_memo(build_fixture_cpr(), uw_win, pricing_alive)
+    _check("legacy 3-arg render_memo call still renders", "DEAL MEMO" in memo_legacy)
+
+    print(f"\ndeal_memo.py: rendered {len(memo)} chars (winning scenario)")
+    print(f"deal_memo.py: checks {_results['pass']} passed, {_results['fail']} failed")
     print("deal_memo.py: all self-checks passed")
