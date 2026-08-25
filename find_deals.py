@@ -19,6 +19,7 @@ from src.pricing import assign_blast_tier
 from src.compliance import gate_legal_lien
 from src.synthesis import portfolio_stats, render_stats_report, get_city
 from src.cpr import CPR
+from src.addr import is_plausible_street_address, normalize_address
 from src.io_utils import write_json, write_text  # atomic crash-safe writers (shared contract)
 
 # F1: dataset location is overridable via env; default keeps the lucid-noether path.
@@ -95,6 +96,65 @@ def merge_prior_enrichment(deals: list[dict], prior_path: str) -> list[dict]:
     print(f"  Merge-on-write: {records_merged}/{len(deals)} refreshed record(s), "
           f"{fields_carried} enrichment field(s) carried forward from prior dataset")
     return deals
+
+
+# --- ADDRESS-QUALITY GATE (src.addr shared contract) --------------------------
+# Every record address is routed through src.addr.normalize_address. Records
+# whose address is not a plausible street address (legal prose, out-of-state,
+# corrupted tokens, missing zip/state) carry an in-memory "invalid_query"
+# marker, are excluded from every TOP table and the TOP-EQUITY-PROSPECTS list,
+# but REMAIN in the saved dataset untouched: strip_invalid_query_markers()
+# removes the runtime-only key before write_json so the current_deals.json
+# row schema stays exactly as before.
+INVALID_QUERY_KEY = "invalid_query"
+
+
+def mark_invalid_query(deal: dict) -> dict:
+    """Stamp *deal* with INVALID_QUERY_KEY when its address is implausible.
+
+    The marker value is the normalize_address invalid_reason (truthy string).
+    Plausible addresses are returned unmodified — no key is added, so valid
+    rows keep their exact legacy schema.
+    """
+    addr = deal.get("address") or ""
+    if is_plausible_street_address(addr):
+        return deal
+    deal[INVALID_QUERY_KEY] = \
+        normalize_address(addr).invalid_reason or "unparseable address"
+    return deal
+
+
+def has_plausible_address(deal: dict) -> bool:
+    """True unless the deal carries an invalid_query marker."""
+    return not deal.get(INVALID_QUERY_KEY)
+
+
+def rankable_deals(deals: list[dict]) -> list[dict]:
+    """Deals eligible for TOP tables / equity lists (address-quality gate)."""
+    return [d for d in deals if has_plausible_address(d)]
+
+
+def top_equity_prospects(deals: list[dict], limit: int = 10) -> list[dict]:
+    """Positive-equity deals sorted desc — malformed addresses excluded."""
+    candidates = [d for d in rankable_deals(deals)
+                  if d.get("equity_estimate") and d["equity_estimate"] > 0]
+    candidates.sort(key=lambda d: d["equity_estimate"], reverse=True)
+    return candidates[:limit]
+
+
+def count_malformed_addresses(deals: list[dict]) -> int:
+    """Number of deals excluded by the address-quality gate."""
+    return sum(1 for d in deals if not has_plausible_address(d))
+
+
+def strip_invalid_query_markers(deals: list[dict]) -> list[dict]:
+    """Copies of *deals* WITHOUT the runtime-only invalid_query marker.
+
+    The saved dataset must stay byte-schema-identical to the legacy format;
+    callers pass this result to write_json instead of the marked lists.
+    """
+    return [{k: v for k, v in d.items() if k != INVALID_QUERY_KEY}
+            for d in deals]
 
 
 def load_prior_dataset():
@@ -200,7 +260,7 @@ def analyze_deal(cpr: CPR) -> dict:
     capital = preliminary_mao or 0
     tier = assign_blast_tier(capital)
 
-    return {
+    deal = {
         "address": addr, "city": city, "county": cpr.county,
         "parcel_id": cpr.parcel_id, "owner": owner, "property_type": ptype,
         "sqft": sqft, "beds": beds, "baths": baths, "year_built": yr_built,
@@ -227,6 +287,9 @@ def analyze_deal(cpr: CPR) -> dict:
         "val_gate": val_status,
         "hitl_required": "MLS/appraiser comp pull for real ARV",
     }
+    # Address-quality gate: stamp implausible scrape garbage so ranking code
+    # can skip it; the saved record itself stays untouched (schema included).
+    return mark_invalid_query(deal)
 
 
 def main():
@@ -264,7 +327,13 @@ def main():
         deals.append(deal)
 
     # Print summary table for all deals with debt
-    deals_with_debt = [d for d in deals if d["mortgage_debt"]]
+    # Address-quality tally: malformed records stay in the saved dataset but
+    # are skipped by every TOP table / equity list below.
+    print(f"\n  Address quality gate: "
+          f"{count_malformed_addresses(deals)} addresses skipped as malformed.")
+
+    deals_with_debt = [d for d in deals
+                       if d["mortgage_debt"] and has_plausible_address(d)]
     deals_with_debt.sort(key=lambda d: d["mortgage_debt"], reverse=True)
 
     print(f"\n  Total deals: {len(deals)}")
@@ -287,7 +356,8 @@ def main():
         print(f"  {i:>3} {addr_short:<45} {city_short:<15} {debt_str} {cad_str} {ltv_str} {eq_str} {lender_short}")
 
     # Print deals with full property details
-    deals_with_details = [d for d in deals if d["sqft"]]
+    deals_with_details = [d for d in deals
+                          if d["sqft"] and has_plausible_address(d)]
     print(f"\n  DEALS WITH FULL PROPERTY DETAILS ({len(deals_with_details)}):")
     for i, d in enumerate(deals_with_details[:10], 1):
         print(f"\n  {i}. {d['address']}")
@@ -329,7 +399,10 @@ def main():
     # geocode-backfill results survive this regeneration (see the
     # MERGE-ON-WRITE comment above).
     merge_prior_enrichment(deals, deals_file)
-    deals_path = write_json(deals_file, deals, default=str)
+    # Address-quality gate: the invalid_query marker is runtime-only. Strip it
+    # so the persisted row schema is identical to the legacy dataset format.
+    deals_payload = strip_invalid_query_markers(deals)
+    deals_path = write_json(deals_file, deals_payload, default=str)
 
     stats_path = write_text(os.path.join(output_dir, "live_portfolio_stats.md"), report)
 
@@ -367,12 +440,12 @@ def main():
     print(f"  Underwater (debt > CAD): {underwater}")
     print(f"  All require MLS/appraiser HITL for real ARV (non-disclosure state)")
 
-    # Top equity prospects
-    equity_deals = [d for d in deals if d["equity_estimate"] and d["equity_estimate"] > 0]
+    # Top equity prospects — malformed addresses excluded via the gate
+    # (rankable_deals inside top_equity_prospects).
+    equity_deals = top_equity_prospects(deals)
     if equity_deals:
-        equity_deals.sort(key=lambda d: d["equity_estimate"], reverse=True)
         print(f"\n  TOP 10 EQUITY PROSPECTS (CAD-based, needs MLS verification):")
-        for i, d in enumerate(equity_deals[:10], 1):
+        for i, d in enumerate(equity_deals, 1):
             print(f"  {i:>2}. {d['address'][:40]:<42} equity ~${d['equity_estimate']:>10,.0f} ({d['equity_pct']:>3.0f}%) | debt ${d['mortgage_debt']:>10,.0f} | {d['lender'] or 'Unknown'}")
 
     print("\n" + "=" * 70)
