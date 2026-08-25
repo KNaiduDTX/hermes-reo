@@ -36,9 +36,15 @@ _DISPLAYED_ADDRESS_LABELS = (
     re.compile(r"Situs\s+Address\b[:\s]*(.+)", re.IGNORECASE),
     re.compile(r"Property\s+Address\b[:\s]*(.+)", re.IGNORECASE),
 )
+# Live DCAD detail pages label the situs with a bare "Address:" line whose
+# VALUE sits on its own following line, using non-breaking spaces and an
+# ABBREVIATED street type ("15806\xa0BREEDLOVE\xa0PL") — no city/zip there.
+_ADDRESS_LABEL_ONLY_RE = re.compile(r"^Address\s*:?\s*$", re.IGNORECASE)
 _FALLBACK_ADDR_LINE_RE = re.compile(
     r"^\d+\s+[A-Za-z].*\bTX\b.*\d{5}", re.IGNORECASE
 )
+# Situs line without city/zip: street number + alpha tokens (e.g. "15806 BREEDLOVE PL")
+_SITUS_LINE_RE = re.compile(r"^\d{1,6}\s+[A-Za-z]{3,}[A-Za-z ]*$")
 
 
 def _address_tokens(address: str) -> dict | None:
@@ -61,18 +67,33 @@ def _address_tokens(address: str) -> dict | None:
 
 
 def _extract_displayed_address(soup) -> str:
-    """Best-effort extraction of the address displayed on a DCAD page."""
+    """Best-effort extraction of the address displayed on a DCAD page.
+
+    Adapted to live dallascad.org detail pages (probed Aug 2026): the situs
+    renders as a bare "Address:" label with its value on the next line,
+    using non-breaking spaces and an abbreviated street type.
+    """
     if soup is None:
         return ""
-    text = soup.get_text("\n")
-    for label_re in _DISPLAYED_ADDRESS_LABELS:
-        m = label_re.search(text)
-        candidate = m.group(1).strip().strip(":").strip() if m else ""
-        if candidate:
-            return candidate
-    for line in text.splitlines():
-        line = line.strip()
-        if _FALLBACK_ADDR_LINE_RE.match(line):
+    text = soup.get_text("\n").replace("\xa0", " ")
+    lines = [ln.strip() for ln in text.splitlines()]
+
+    for idx, ln in enumerate(lines):
+        for label_re in _DISPLAYED_ADDRESS_LABELS:
+            m = label_re.search(ln)
+            if m and m.group(1).strip():
+                return m.group(1).strip().strip(":").strip()
+        if _ADDRESS_LABEL_ONLY_RE.match(ln):
+            # Value lives on one of the next few non-empty lines.
+            for nxt in lines[idx + 1: idx + 4]:
+                if not nxt:
+                    continue
+                if _SITUS_LINE_RE.match(nxt) or _FALLBACK_ADDR_LINE_RE.match(nxt):
+                    return nxt
+                break  # first non-empty line after "Address:" wasn't a situs
+
+    for line in lines:
+        if _FALLBACK_ADDR_LINE_RE.match(line) or _SITUS_LINE_RE.match(line):
             return line
     return ""
 
