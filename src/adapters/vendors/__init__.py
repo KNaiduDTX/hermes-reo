@@ -1,0 +1,1 @@
+# src/adapters/vendors/__init__.py

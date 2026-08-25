@@ -1,0 +1,23 @@
+# Virtualenv
+.venv/
+venv/
+
+# Python artifacts
+__pycache__/
+*.pyc
+.pytest_cache/
+.ruff_cache/
+*.egg-info/
+
+# Derived data & outputs (contain scraped public-record PII; never commit)
+data/
+out/
+static/
+
+# OS noise
+.DS_Store
+Thumbs.db
+
+# Local env
+.env
+.env.*
