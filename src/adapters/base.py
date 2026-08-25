@@ -7,7 +7,7 @@ from __future__ import annotations
 import hashlib
 import re
 from dataclasses import dataclass, field
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import Any, Optional
 
 
@@ -68,7 +68,8 @@ class NormalizedLead:
 class SourceProvenance:
     """Provenance metadata for a source adapter."""
     source: str
-    retrieved_at: str = field(default_factory=lambda: datetime.utcnow().isoformat())
+    retrieved_at: str = field(
+        default_factory=lambda: datetime.now(timezone.utc).isoformat())
     source_rigor_tier: int = 0  # 0=vendor_avm, 1=title_feed, 2=appraiser, 3=mls_agent
 
 
@@ -80,7 +81,7 @@ class SourceAdapter:
     channel: str = ""
     county: str = ""
 
-    def fetch(self, **params) -> list[NormalizedLead]:
+    def fetch(self, **params: Any) -> list[NormalizedLead]:
         """Fetch leads from the source. Subclasses must implement."""
         raise NotImplementedError
 

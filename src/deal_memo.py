@@ -5,8 +5,8 @@ Fixed sections every time so deals are comparable and portfolio analytics trivia
 Render targets: Markdown (agent-native). PDF/XLSX export via skill.
 """
 from __future__ import annotations
-from datetime import datetime
-from typing import TYPE_CHECKING, Optional
+from datetime import datetime, timezone
+from typing import TYPE_CHECKING, Any, Optional
 from .cpr import CPR, CPRColumn, BlastTier
 from .dates import parse_date_any
 from .underwriting import UnderwriteResult
@@ -21,7 +21,7 @@ if TYPE_CHECKING:  # avoid a hard runtime dependency on the reviewer module
     from .reviewer import ReviewResult
 
 
-def _unwrap(value, placeholder: str = "—"):
+def _unwrap(value: Any, placeholder: str = "—") -> Any:
     """Unwrap ProvenanceField-style objects; None/'' values render as placeholder.
 
     AUDIT fix: the memo used to print the literal string "None" whenever a
@@ -35,7 +35,7 @@ def _unwrap(value, placeholder: str = "—"):
 
 
 def recommend_deal(cpr: CPR, underwrite: UnderwriteResult, pricing: PricingResult,
-                   review: Optional["ReviewResult"] = None):
+                   review: Optional["ReviewResult"] = None) -> tuple[str, list[str], list[str]]:
     """Gate PROCEED on hard evidence. Returns (verdict, blockers, cautions).
 
     AUDIT C2/C3: PROCEED requires ALL of —
@@ -138,7 +138,7 @@ def render_memo(cpr: CPR, underwrite: UnderwriteResult, pricing: PricingResult,
     is omitted the recommendation is capped at CONDITIONAL (HITL).
     """
     lines = []
-    now = datetime.utcnow().strftime("%Y-%m-%d %H:%M UTC")
+    now = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
 
     # 1. Header
     lines.append(f"# DEAL MEMO — {cpr.parcel_id} — {cpr.situs_address} — {cpr.county.title()} County")
@@ -317,7 +317,7 @@ def render_memo(cpr: CPR, underwrite: UnderwriteResult, pricing: PricingResult,
         lines.append(f"- [ ] Bilateral equitable-interest disclosure generated (Prop. Code §5.0205)")
         lines.append(f"- [ ] Assignable contract with 'and/or assigns'")
     lines.append(f"- [ ] GATE-LEGAL-LIEN: title/lien priority confirmed")
-    lines.append(f"- [ ] LEGAL-RULES version verified ({datetime.utcnow().strftime('%Y-%m-%d')})")
+    lines.append(f"- [ ] LEGAL-RULES version verified ({datetime.now(timezone.utc).strftime('%Y-%m-%d')})")
     lines.append("")
 
     # 10. Recommendation + gate trail

@@ -1,14 +1,23 @@
 repos:
-  - repo: https://github.com/astral-sh/ruff-pre-commit
-    rev: v0.6.9
-    hooks:
-      - id: ruff
-        args: [--select, "E9,F63,F7,F82,B006,B017", --src]
   - repo: local
     hooks:
-      - id: no-network-tests-by-default
-        name: block committing changes that break unit tests
-        entry: bash -c 'cd "$PWD" && .venv/bin/python -m pytest -m "not live and not recalc" -x -q'
+      - id: ruff-correctness
+        name: ruff (correctness errors)
+        entry: .venv/bin/ruff check --select E9,F63,F7,F82,B006,B017
+        language: system
+        types: [python]
+        pass_filenames: true
+      - id: no-utcnow
+        name: no naive utcnow in src/
+        entry: bash -c '! grep -rn "datetime.utcnow()" src/ || (echo "naive utcnow found" && exit 1)'
+        language: system
+        pass_filenames: false
+        files: ^src/
+  - repo: local
+    hooks:
+      - id: unit-tests-pre-push
+        name: unit tests
+        entry: .venv/bin/python -m pytest -q
         language: system
         pass_filenames: false
         stages: [pre-push]

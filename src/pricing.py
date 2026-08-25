@@ -49,29 +49,52 @@ class PricingResult:
     # explicitly; kept so existing readers (reviewer, pipeline) keep working.
     optimistic_only_flag: Optional[bool] = None
 
-    def __post_init__(self):
+    def __post_init__(self) -> None:
         if self.optimistic_only_flag is None:
             self.optimistic_only_flag = self.pencil_status == PENCIL_OPTIMISTIC_ONLY
 
 
 def compute_bid_ceiling(arv: float, rehab: float, factor: float, mao_val: float,
                         cash_available: float = float("inf"),
-                        surviving_liens: list[LienRecord] = None) -> float:
+                        surviving_liens: Optional[list[LienRecord]] = None,
+                        deal_type: str = "") -> float:
     """Bid ceiling = min(MAO, cash_available, ARV×factor − rehab − surviving_liens), clamped at 0.
 
     AUDIT C2: the ceiling must never exceed MAO or the cash actually
     available, and surviving liens net out of the raw equity number. A
     non-positive result means there is no bid worth making — callers
     (price_deal) treat that as a dead deal rather than offering ≤ $0.
+
+    AUDIT M6 (deal-type-aware lien survival): *which* liens survive depends
+    on how the property is being acquired. ``deal_type`` selects the
+    survival test:
+      * contains TAXDEED/TAX (case-insensitive) → only liens flagged
+        ``survives_tax_sale`` net out (a tax-deed bid does not pay off
+        mortgages that die at the tax sale);
+      * contains AUCTION/FORECLOSURE/PREFORE → only liens flagged
+        ``survives_foreclosure`` net out (an auction bid does not pay off
+        tax-sale-only survivors);
+      * empty or unrecognized → legacy union of both flags, so existing
+        callers keep their historical behavior.
     """
-    surviving_total = sum(l.amount or 0 for l in (surviving_liens or [])
-                          if l.survives_foreclosure or l.survives_tax_sale)
+    dt = str(deal_type or "").upper()
+    liens = surviving_liens or []
+    if "TAXDEED" in dt or "TAX" in dt:
+        surviving_total = sum(l.amount or 0 for l in liens
+                              if l.survives_tax_sale)
+    elif "AUCTION" in dt or "FORECLOSURE" in dt or "PREFORE" in dt:
+        surviving_total = sum(l.amount or 0 for l in liens
+                              if l.survives_foreclosure)
+    else:
+        # Legacy union behavior (backward compat for unknown/empty deal types).
+        surviving_total = sum(l.amount or 0 for l in liens
+                              if l.survives_foreclosure or l.survives_tax_sale)
     raw_ceiling = (arv * factor) - rehab - surviving_total
     return max(0.0, min(raw_ceiling, mao_val, cash_available))
 
 
 def build_offer_ladder(mao_val: float, seller_posture: str = "standard",
-                       bid_ceiling_val: float = float("inf")) -> dict:
+                       bid_ceiling_val: float = float("inf")) -> dict[str, float]:
     """Build opening / target / walk-away offer ladder.
 
     Posture affects how aggressive the opening is:
@@ -107,8 +130,8 @@ def build_offer_ladder(mao_val: float, seller_posture: str = "standard",
 
 
 def sensitivity_grid(arv: float, rehab: float, purchase: float,
-                     arv_deltas: list[float] = None,
-                     rehab_deltas: list[float] = None,
+                     arv_deltas: Optional[list[float]] = None,
+                     rehab_deltas: Optional[list[float]] = None,
                      holding: float = 0, financing: float = 0,
                      closing_buy: float = 0,
                      closing_sell_pct: float = policy.CLOSING_SELL_PCT,
@@ -197,11 +220,14 @@ def price_deal(cpr: CPR, arv: float, rehab: float, deal_type: str = "DT-AUCTION"
     AUDIT C2: when the bid ceiling clamps to ≤ 0 (surviving liens / cash /
     MAO leave nothing to bid) the result is marked dead with
     dead_reason="bid_ceiling_nonpositive" and offer=None — no ladder, no
-    fabricated offer.
+    fabricated offer. AUDIT M6: the CPR's deal_type is passed through to
+    compute_bid_ceiling so only liens that survive THIS acquisition path
+    net out of the ceiling.
     """
     mao_val = mao(arv, rehab, factor)
     ceiling = compute_bid_ceiling(arv, rehab, factor, mao_val,
-                                  cash_available, cpr.liens)
+                                  cash_available, cpr.liens,
+                                  deal_type=deal_type)
     tier = assign_blast_tier(capital_at_risk, deal_type)
 
     # Grid purchase basis: the most we would actually pay. When the ceiling is
@@ -298,6 +324,34 @@ if __name__ == "__main__":
     _check("ceiling respects cash_available cap",
            compute_bid_ceiling(300_000, 30_000, 0.70, mao_val=400_000,
                                cash_available=50_000) == 50_000)
+
+    # --- AUDIT M6: deal-type-aware lien survival selection ---
+    fc_only = LienRecord(lien_type="irs_federal", amount=100_000,
+                         survives_foreclosure=True, survives_tax_sale=False)
+    tax_only = LienRecord(lien_type="tax", amount=100_000,
+                          survives_foreclosure=False, survives_tax_sale=True)
+    _check("M6: empty/unknown deal type keeps legacy union behavior",
+           compute_bid_ceiling(200_000, 50_000, 0.70, mao_val=140_000,
+                               surviving_liens=[fc_only]) == 0.0
+           and compute_bid_ceiling(200_000, 50_000, 0.70, mao_val=140_000,
+                                   surviving_liens=[tax_only]) == 0.0)
+    _check("M6: DT-TAXDEED ceiling ignores foreclosure-only survivor",
+           compute_bid_ceiling(200_000, 50_000, 0.70, mao_val=140_000,
+                               surviving_liens=[fc_only],
+                               deal_type="dt-taxdeed") == 90_000)
+    _check("M6: DT-AUCTION ceiling ignores tax-sale-only survivor",
+           compute_bid_ceiling(200_000, 50_000, 0.70, mao_val=140_000,
+                               surviving_liens=[tax_only],
+                               deal_type="DT-AUCTION") == 90_000)
+    cpr_m6 = CPR(parcel_id="m6-test", county="collin")
+    cpr_m6.add_lien(fc_only, "test")
+    m6_td = price_deal(cpr_m6, arv=200_000, rehab=50_000, deal_type="DT-TAXDEED")
+    m6_auc = price_deal(cpr_m6, arv=200_000, rehab=50_000, deal_type="DT-AUCTION")
+    _check("M6: price_deal passes deal_type through (TAXDEED alive)",
+           m6_td.bid_ceiling == 90_000 and m6_td.dead_reason is None)
+    _check("M6: price_deal passes deal_type through (AUCTION dead)",
+           m6_auc.bid_ceiling == 0
+           and m6_auc.dead_reason == DEAD_BID_CEILING_NONPOSITIVE)
 
     # --- AUDIT C2: lien overload — ceiling clamps to 0, deal goes dead ---
     cpr_dead = CPR(parcel_id="dead-test", county="collin")

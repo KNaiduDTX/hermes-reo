@@ -7,7 +7,7 @@ overwrites; corrections are new receipts appended to the provenance ledger.
 from __future__ import annotations
 import dataclasses
 from dataclasses import dataclass, field
-from datetime import datetime, date
+from datetime import datetime, date, timezone
 from typing import Any, Optional
 from enum import Enum
 import hashlib
@@ -66,10 +66,11 @@ class ProvenanceField:
     """A single field value with provenance metadata."""
     value: Any
     source: str
-    retrieved_at: str = field(default_factory=lambda: datetime.utcnow().isoformat())
+    retrieved_at: str = field(
+        default_factory=lambda: datetime.now(timezone.utc).isoformat())
     confidence: float = 0.0  # 0.0-1.0
 
-    def to_dict(self) -> dict:
+    def to_dict(self) -> dict[str, Any]:
         return {"value": self.value, "source": self.source,
                 "retrieved_at": self.retrieved_at, "confidence": self.confidence}
 
@@ -81,7 +82,8 @@ class ProvenanceEntry:
     old_value: Any
     new_value: Any
     source: str
-    timestamp: str = field(default_factory=lambda: datetime.utcnow().isoformat())
+    timestamp: str = field(
+        default_factory=lambda: datetime.now(timezone.utc).isoformat())
     prev_hash: str = ""
     entry_hash: str = ""
     note: str = ""  # e.g. "undeclared-field" for county-specific extras (audit D4)
@@ -118,7 +120,7 @@ class ValuationObject:
     gate_val_verdict: str = ""  # pass, fail, hitl
     gate_val_reason: str = ""
 
-    def to_dict(self) -> dict:
+    def to_dict(self) -> dict[str, Any]:
         return {
             "as_is_value": self.as_is_value.to_dict() if self.as_is_value else None,
             "arv": self.arv.to_dict() if self.arv else None,
@@ -237,7 +239,8 @@ class CPR:
                 f"confidence must be within 0..1 for {context}, got {confidence!r}"
             )
 
-    def set_field(self, field_name: str, value: Any, source: str, confidence: float = 0.0):
+    def set_field(self, field_name: str, value: Any, source: str,
+                  confidence: float = 0.0) -> None:
         """Set a field and append to the provenance ledger.
 
         Confidence outside 0..1 raises ValueError. Undeclared field names are
@@ -262,7 +265,8 @@ class CPR:
         entry.entry_hash = entry.compute_hash()
         self.ledger.append(entry)
 
-    def add_lien(self, lien: LienRecord, source: str, confidence: float = 0.0):
+    def add_lien(self, lien: LienRecord, source: str,
+                 confidence: float = 0.0) -> None:
         """Add a lien to the encumbrance stack.
 
         The ledger receipt records the amount alongside lien_type and both
@@ -285,7 +289,7 @@ class CPR:
         entry.entry_hash = entry.compute_hash()
         self.ledger.append(entry)
 
-    def move_column(self, new_column: CPRColumn, reason: str = ""):
+    def move_column(self, new_column: CPRColumn, reason: str = "") -> None:
         """Move to a new Kanban column (receipted)."""
         old = self.column
         self.column = new_column
@@ -303,7 +307,7 @@ class CPR:
         sale = pv_value(self.sale_date) if self.sale_date else ""
         return f"{self.county}|{self.parcel_id}|{self.channel}|{sale}"
 
-    def to_dict(self) -> dict:
+    def to_dict(self) -> dict[str, Any]:
         """Serialize to dict (for JSON export / DB storage)."""
         d = {"lien_lookup_status": self.lien_lookup_status}
         for k, v in self.__dict__.items():

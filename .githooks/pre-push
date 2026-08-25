@@ -1,0 +1,5 @@
+#!/bin/bash
+REPO=$(git rev-parse --show-toplevel)
+export PRE_COMMIT_HOME="$REPO/.pc-home"
+echo "[pre-push] running unit tests…"
+exec "$REPO/.venv/bin/python" -m pytest -q

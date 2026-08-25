@@ -9,7 +9,8 @@ import json
 import re
 import statistics
 from collections import Counter
-from typing import Optional
+from datetime import datetime, timezone
+from typing import Any, Optional
 
 from .cpr import CPRColumn, pv_value
 # X7: reuse AGENT-ENR's ISD extraction so portfolio rollups and enrichment can
@@ -49,7 +50,7 @@ def get_city(addr: str) -> str:
     return "Unknown"
 
 
-def _parse_value(val) -> float:
+def _parse_value(val: Any) -> float:
     """Parse a dollar value from a string like '$730,673.00'."""
     if val is None or val == "Unknown":
         return 0.0
@@ -59,7 +60,7 @@ def _parse_value(val) -> float:
     return float(cleaned) if cleaned else 0.0
 
 
-def portfolio_stats(cprs: list) -> dict:
+def portfolio_stats(cprs: list[Any]) -> dict[str, Any]:
     """Compute portfolio-level statistics across all CPRs.
 
     Ported from lucid-noether analyze_foreclosures.py.
@@ -192,7 +193,7 @@ def portfolio_stats(cprs: list) -> dict:
     return result
 
 
-def render_stats_report(stats: dict) -> str:
+def render_stats_report(stats: dict[str, Any]) -> str:
     """Render portfolio stats as Markdown — ported from lucid-noether stats_summary.md format."""
     lines = []
     lines.append("# PORTFOLIO STATISTICAL SUMMARY")
@@ -243,7 +244,7 @@ def render_stats_report(stats: dict) -> str:
     return "\n".join(lines)
 
 
-def weekly_digest(cprs: list, dead_reasons: dict = None) -> str:
+def weekly_digest(cprs: list[Any], dead_reasons: Optional[dict[str, int]] = None) -> str:
     """Generate a weekly deal-flow digest.
 
     Args:
@@ -252,7 +253,7 @@ def weekly_digest(cprs: list, dead_reasons: dict = None) -> str:
     """
     lines = []
     lines.append("# WEEKLY DEAL-FLOW DIGEST")
-    lines.append(f"\nGenerated: {__import__('datetime').datetime.utcnow().isoformat()}")
+    lines.append(f"\nGenerated: {datetime.now(timezone.utc).isoformat()}")
 
     # Active deals by column
     column_counts = {}

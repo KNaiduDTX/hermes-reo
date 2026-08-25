@@ -4,6 +4,7 @@ C2  negative bid ceiling -> negative purchase -> fake profit
 H1  underwriting defaulting purchase to MAO
 H3  walk-away exceeding MAO
 F12 optimistic_only mislabeling never-pencils deals
+M6  bid ceiling subtracting liens that do not survive the deal type
 """
 import pytest
 
@@ -34,6 +35,71 @@ def test_ceiling_never_exceeds_mao():
     ceiling = compute_bid_ceiling(arv=500_000, rehab=20_000, factor=0.70,
                                   mao_val=150_000)
     assert ceiling <= 150_000
+
+
+# --- AUDIT M6: deal-type-aware lien survival selection ---
+
+FC_ONLY = LienRecord(lien_type="irs_federal", amount=100_000.0,
+                     survives_foreclosure=True, survives_tax_sale=False)
+TAX_ONLY = LienRecord(lien_type="tax", amount=100_000.0,
+                      survives_foreclosure=False, survives_tax_sale=True)
+
+# Raw equity before liens: 200k * 0.70 - 50k rehab = 90k.
+_ARV, _REHAB, _FACTOR, _MAO = 200_000.0, 50_000.0, 0.70, 140_000.0
+
+
+def test_unknown_or_empty_deal_type_keeps_legacy_union():
+    """Backward compat: without a deal type either survivor nets out."""
+    assert compute_bid_ceiling(arv=_ARV, rehab=_REHAB, factor=_FACTOR,
+                               mao_val=_MAO, surviving_liens=[FC_ONLY]) == 0
+    assert compute_bid_ceiling(arv=_ARV, rehab=_REHAB, factor=_FACTOR,
+                               mao_val=_MAO, surviving_liens=[TAX_ONLY]) == 0
+
+
+def test_taxdeed_ceiling_ignores_foreclosure_only_survivor():
+    """AUDIT M6: a tax-deed bid does not pay off liens that die at tax sale.
+
+    The IRS lien (foreclosure-only survivor) must be excluded from a
+    DT-TAXDEED ceiling: raw equity 90k stays intact instead of clamping
+    to 0 under the legacy union.
+    """
+    ceiling = compute_bid_ceiling(arv=_ARV, rehab=_REHAB, factor=_FACTOR,
+                                  mao_val=_MAO, surviving_liens=[FC_ONLY],
+                                  deal_type="DT-TAXDEED")
+    assert ceiling == 90_000
+    # Case-insensitive matching.
+    assert compute_bid_ceiling(arv=_ARV, rehab=_REHAB, factor=_FACTOR,
+                               mao_val=_MAO, surviving_liens=[FC_ONLY],
+                               deal_type="dt-taxdeed") == 90_000
+
+
+def test_auction_ceiling_ignores_tax_sale_only_survivor():
+    """AUDIT M6: an auction bid does not pay off tax-sale-only survivors."""
+    ceiling = compute_bid_ceiling(arv=_ARV, rehab=_REHAB, factor=_FACTOR,
+                                  mao_val=_MAO, surviving_liens=[TAX_ONLY],
+                                  deal_type="DT-AUCTION")
+    assert ceiling == 90_000
+
+
+def test_price_deal_passes_deal_type_to_ceiling():
+    """price_deal threads deal_type through to compute_bid_ceiling (M6).
+
+    Same CPR, same numbers: the foreclosure-only IRS survivor is ignored
+    for DT-TAXDEED (alive at a 90k ceiling) but honored for DT-AUCTION
+    (ceiling swamped -> dead).
+    """
+    cpr = CPR(parcel_id="M6", county="collin", situs_address="1 Main St")
+    cpr.add_lien(FC_ONLY, "test")
+
+    priced_td = price_deal(cpr, arv=_ARV, rehab=_REHAB,
+                           deal_type="DT-TAXDEED")
+    assert priced_td.bid_ceiling == 90_000
+    assert priced_td.dead_reason is None
+
+    priced_auc = price_deal(cpr, arv=_ARV, rehab=_REHAB,
+                            deal_type="DT-AUCTION")
+    assert priced_auc.bid_ceiling == 0
+    assert priced_auc.dead_reason is not None
 
 
 def test_route_underwrite_requires_purchase():

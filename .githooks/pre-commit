@@ -1,0 +1,6 @@
+#!/bin/bash
+# Self-contained pre-commit: keeps caches inside the repo so hooks work in
+# any environment (sandboxed CI containers, restricted HOME, etc.).
+REPO=$(git rev-parse --show-toplevel)
+export PRE_COMMIT_HOME="$REPO/.pc-home"
+exec "$REPO/.venv/bin/python" -m pre_commit run "$@"

@@ -21,3 +21,6 @@ Thumbs.db
 # Local env
 .env
 .env.*
+
+# pre-commit cache (repo-local)
+.pc-home/

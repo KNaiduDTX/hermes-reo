@@ -6,7 +6,8 @@ inputs, not constants.
 """
 from __future__ import annotations
 from dataclasses import dataclass, field
-from typing import Optional
+from typing import Any, Optional
+from .cpr import CPR
 from .legal_rules import DealType, RedemptionClass, compute_redemption_yield
 from . import policy
 
@@ -36,7 +37,7 @@ class UnderwriteResult:
     redemption_yield: Optional[float] = None
     refi_recycle_pct: Optional[float] = None
     # Details
-    line_items: dict = field(default_factory=dict)
+    line_items: dict[str, Any] = field(default_factory=dict)
 
 
 def mao(arv: float, rehab: float, factor: float = policy.MAO_FACTOR_DEFAULT) -> float:
@@ -222,7 +223,7 @@ def tax_deed_yield(bid: float, recording_fee: float = 0.0,
     )
 
 
-def _require_purchase(kwargs: dict) -> float:
+def _require_purchase(kwargs: dict[str, Any]) -> float:
     """AUDIT H1: the purchase price must be supplied explicitly.
 
     The old default-to-MAO silently underwrote unpriced deals at their own
@@ -237,14 +238,17 @@ def _require_purchase(kwargs: dict) -> float:
     return kwargs["purchase"]
 
 
-def route_underwrite(cpr, arv: float, rehab: float, deal_type: str = "DT-AUCTION",
-                     **kwargs) -> UnderwriteResult:
+def route_underwrite(cpr: Optional[CPR], arv: float, rehab: float,
+                     deal_type: str = "DT-AUCTION",
+                     **kwargs: Any) -> UnderwriteResult:
     """Route to the correct underwriting model based on deal type.
 
     AUDIT H1: `purchase` is REQUIRED for every purchase-price model
     (flip / wholesale / default) — a missing purchase raises ValueError
     instead of defaulting to MAO. The routed `deal_type` is stamped onto
     the result (the models' own defaults only apply to direct calls).
+    ``cpr`` is accepted for interface symmetry with the other AGENT-*
+    entrypoints; the pure models here do not read it.
     """
     dt = getattr(deal_type, "value", deal_type)
     if dt == "DT-AUCTION" or dt == "DT-PREFORE":
