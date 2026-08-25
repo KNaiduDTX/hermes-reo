@@ -285,3 +285,27 @@
 - ⚠️ 403 — live but blocks curl; requires browser automation
 - ❌ 000 — unreachable via curl; needs browser verification
 - TBD — not yet verified; priority for WS-00
+
+---
+
+## Grayson County — Manual Channel
+
+**Added:** 2026-08-25 · **Trigger:** adapter probes (`src/adapters/grayson_tax.py`, Aug 2026) confirmed the automated tax-sale channels dead.
+
+### Confirmed-dead portals (per adapter probes)
+
+| Portal | URL | Probe result |
+|--------|-----|--------------|
+| Tax sale search (`tax_sale`) | https://taxsearch.co.grayson.tx.us:8443/Sales/ssale | ❌ **DNS NXDOMAIN** — dead subdomain; HTTP and HTTPS both resolve nowhere |
+| County tax page (`tax_sale` fallback) | https://www.co.grayson.tx.us/page/tax.sale | ⚠️ **403 Forbidden** |
+| Sheriff's office page | https://www.co.grayson.tx.us/page/gcso.home | Loads, but carries no sale listings |
+| Tax Assessor-Collector portal | grayson.propertytaxpayments.net | Payments only — no sale lists |
+
+### Manual procedure (only current path to Grayson leads)
+
+1. **Contact Grayson County Sheriff's Office** — request the current sheriff/constable sale list (judicial tax sales; sales occur first Tuesday at the courthouse, west door per county clerk).
+2. **Contact Grayson County Tax Assessor-Collector** — request the delinquent-tax suit / struck-off property list (upstream of sale).
+3. **Hand-enter each lead** into the pipeline as a CPR (INBOX column), with `source` provenance recording which office supplied it.
+4. **Future home:** a manual lead-entry path (CLI/form) so step 3 stops being hand-edited JSON — tracked in SYSTEM_REPORT §11 gap table ("Grayson County: no data source").
+
+> Note: `co.grayson.tx.us` returns 403 to curl but renders in a browser — the county site remains manually browsable even though automation is blocked.
