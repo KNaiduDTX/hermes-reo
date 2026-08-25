@@ -15,6 +15,7 @@
 # runner prints a hint and exits 0 without touching the network.
 from __future__ import annotations
 import argparse
+import re
 import json
 import os
 import subprocess
@@ -612,13 +613,26 @@ def _run_bulk_dcad():
     from src.enrichment import enrich_from_flat_record
     from src.adapters.dallas_cad_bulk import cross_reference_dcad_bulk
 
-    dallas_cprs = []
+    # Query-sanity guard (Wave 3 ops): legacy PDF-scrape artifacts include
+    # legal-prose fragments and out-of-state strings ("60 foot right-of-way",
+    # "Virginia Beach"). DCAD lookups for those burn politeness budget and
+    # always fail echo-back; require street-number + words + TX zip shape.
+    _us_street_tx = re.compile(
+        r"^\d{1,6}\s+[A-Za-z].*\bTX\b\s*\d{5}", re.IGNORECASE)
+    dallas_cprs, skipped_invalid = [], 0
     for record in records:
         if record.get("county", "").lower() == "dallas":
             # D1 FIX: flat schema → flat-record enricher (nested reader no-ops)
             cpr = enrich_from_flat_record(record)
-            if cpr and cpr.situs_address and cpr.situs_address != "Unknown":
-                dallas_cprs.append(cpr)
+            if not (cpr and cpr.situs_address and cpr.situs_address != "Unknown"):
+                continue
+            if not _us_street_tx.match(cpr.situs_address.strip()):
+                skipped_invalid += 1
+                continue
+            dallas_cprs.append(cpr)
+    if skipped_invalid:
+        print(f"  Skipped {skipped_invalid} records with malformed/out-of-state "
+              f"addresses (legacy scrape artifacts)")
 
     print(f"  Dallas CPRs to cross-reference: {len(dallas_cprs)}")
     if not dallas_cprs:
