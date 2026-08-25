@@ -23,12 +23,16 @@
 # GATE-VAL is live cell logic, not a comment.
 from __future__ import annotations
 import os, sys
-from pathlib import Path
+from datetime import date
+
+from src.dates import parse_date_any
+
 from openpyxl import Workbook
 from openpyxl.styles import Font, PatternFill, Alignment, Border, Side, numbers
 from openpyxl.comments import Comment
 from openpyxl.workbook.defined_name import DefinedName
 from openpyxl.utils import get_column_letter
+from openpyxl.formatting.rule import FormulaRule
 
 # --- Style constants ---
 BLUE = Font(color="0000FF")
@@ -102,6 +106,19 @@ def col_widths(ws, widths):
     for col, w in widths.items():
         ws.column_dimensions[col].width = w
 
+def add_text_rule(ws, rng, needle, fill):
+    """Conditional format: highlight cells in rng whose text contains needle.
+
+    SEARCH-based FormulaRule instead of CellIsRule containsText, which some
+    engines (LibreOffice) do not honor; the formula is anchored to the first
+    cell of the range and applies relatively to every cell in it.
+    """
+    first_cell = rng.split(":")[0]
+    ws.conditional_formatting.add(
+        rng,
+        FormulaRule(formula=[f'NOT(ISERROR(SEARCH("{needle}",{first_cell})))'], fill=fill),
+    )
+
 
 # ============================================================
 # BUILD WORKBOOK
@@ -120,7 +137,7 @@ header_row(ws, 1, "HERMES-REO — Excel Model Suite")
 ws["A3"] = "Version"
 ws["B3"] = "1.0"
 ws["A4"] = "Build date"
-ws["B4"] = "2026-08-20"
+ws["B4"] = date.today().isoformat()
 ws["A5"] = "Jurisdiction"
 ws["B5"] = "Collin / Dallas / Grayson County, TX"
 ws["A6"] = "Status"
@@ -434,6 +451,12 @@ for j, f in enumerate(comp_fields):
     ws.cell(row=4, column=1 + j).value = f
     ws.cell(row=4, column=1 + j).font = BOLD
 
+# Hidden helper column L ("adj-used"): per-row adjusted value that feeds MEDIAN
+# for the weighted ARV (LibreOffice-safe — see WEIGHTED ARV below).
+ws.cell(row=4, column=12).value = "adj-used"
+ws.cell(row=4, column=12).font = BOLD
+ws.column_dimensions["L"].hidden = True
+
 # 6 comp rows (rows 5-10) — seeded with sample DFW comps
 sample_comps = [
     ("10030 Plainsman Ln, Frisco TX", 755000, "2026-06-15", 4200, 5, 4, 9000, 0.10, 45, 4),
@@ -446,9 +469,14 @@ sample_comps = [
 for i in range(6):
     r = 5 + i
     comp = sample_comps[i]
+    sold_date = parse_date_any(comp[2]) if str(comp[2] or "").strip() else None
+    if str(comp[2] or "").strip() and sold_date is None:
+        raise ValueError(f"Seeded comp sold date is unparseable: {comp[2]!r}")
     set_input(ws, f"A{r}", comp[0], f"Source: MLS agent comp #{i+1}")
     set_input(ws, f"B{r}", comp[1], f"Source: sold price — MLS", USD_FMT)
-    set_input(ws, f"C{r}", comp[2], f"Source: sold date — MLS", DATE_FMT)
+    # Blank sold date = unfilled placeholder row: leave the input empty, never
+    # synthesize a date.
+    set_input(ws, f"C{r}", sold_date, f"Source: sold date — MLS", DATE_FMT)
     set_input(ws, f"D{r}", comp[3], f"Source: sqft — MLS")
     set_input(ws, f"E{r}", comp[4], f"Source: beds — MLS")
     set_input(ws, f"F{r}", comp[5], f"Source: baths — MLS")
@@ -458,6 +486,8 @@ for i in range(6):
     set_input(ws, f"J{r}", comp[9], f"Source: condition 1=poor 5=excellent")
     # Adjusted value = sold price (user can add adjustment formulas)
     set_formula(ws, f"K{r}", f"=B{r}", USD_FMT)
+    # Helper for weighted ARV: blank non-positive rows so MEDIAN sees only real comps
+    set_formula(ws, f"L{r}", f'=IF(K{r}>0,K{r},"")', USD_FMT)
 
 # Weighted ARV
 r = 12
@@ -468,9 +498,10 @@ ws.cell(row=r, column=1).value = "Comps with valid price"
 set_formula(ws, f"B{r}", '=COUNTIF(B5:B10,">0")')
 r += 1
 ws.cell(row=r, column=1).value = "Weighted ARV (median of adjusted)"
-# Use SUMPRODUCT to compute median of non-zero comps — compatible with LibreOffice
-# ponytail: AGGREGATE with array division doesn't work in LibreOffice; use a helper column instead
-set_formula(ws, f"B{r}", '=IF(B13>=3,MEDIAN(K5:K9),"Need >=3 comps")', USD_FMT, bold=True)
+# AGGREGATE with array division doesn't work in LibreOffice, so MEDIAN runs over
+# hidden helper column L ("adj-used"), which blanks non-positive rows; the grid
+# spans rows 5-10 and MEDIAN(K5:K9) both dropped row 10 and averaged an empty range.
+set_formula(ws, f"B{r}", '=IF(B13>=3,MEDIAN(L5:L10),"Need >=3 comps")', USD_FMT, bold=True)
 add_name(wb, "weighted_arv", f"'Comp & ARV'!$B${r}")
 r += 1
 ws.cell(row=r, column=1).value = "ARV used in models"
@@ -520,13 +551,9 @@ add_name(wb, "gate_val_pass", f"'Comp & ARV'!$B${r}")
 r += 1
 
 # Conditional formatting on GATE-VAL verdict
-from openpyxl.formatting.rule import CellIsRule
-ws.conditional_formatting.add(f"B{r-2}",
-    CellIsRule(operator="containsText", formula=['"PASS"'], fill=GATE_PASS))
-ws.conditional_formatting.add(f"B{r-2}",
-    CellIsRule(operator="containsText", formula=['"FAIL"'], fill=GATE_FAIL))
-ws.conditional_formatting.add(f"B{r-2}",
-    CellIsRule(operator="containsText", formula=['"WARN"'], fill=GATE_WARN))
+add_text_rule(ws, f"B{r-2}", "PASS", GATE_PASS)
+add_text_rule(ws, f"B{r-2}", "FAIL", GATE_FAIL)
+add_text_rule(ws, f"B{r-2}", "WARN", GATE_WARN)
 
 # Rent estimate
 r += 1
@@ -580,11 +607,9 @@ add_name(wb, "total_rehab", "'Rehab Estimator'!$B$10")
 
 # Kill-switch
 ws.cell(row=12, column=1).value = "Rehab kill-switch (rehab > 70% ARV)"
-set_formula(ws, "B12", '=IF(total_rehab/arv>0.7,"WALK AWAY — rehab exceeds 70% of ARV","OK")', bold=True)
-ws.conditional_formatting.add("B12",
-    CellIsRule(operator="containsText", formula=['"WALK"'], fill=GATE_FAIL))
-ws.conditional_formatting.add("B12",
-    CellIsRule(operator="containsText", formula=['"OK"'], fill=GATE_PASS))
+set_formula(ws, "B12", '=IF(gate_val_pass,IF(total_rehab/arv_used>0.7,"WALK AWAY — rehab exceeds 70% of ARV","OK"),"GATE-VAL FAIL")', bold=True)
+add_text_rule(ws, "B12", "WALK", GATE_FAIL)
+add_text_rule(ws, "B12", "OK", GATE_PASS)
 
 # Line-item breakdown
 subheader(ws, 14, "LINE-ITEM BREAKDOWN (optional — overrides $/SF if used)")
@@ -626,9 +651,9 @@ set_link(ws, "B7", "=rent_estimate", USD_FMT)
 
 subheader(ws, 9, "SCREENING METRICS")
 ws.cell(row=10, column=1).value = "70% Rule MAO"
-set_formula(ws, "B10", "=IF(gate_val_pass,arv*mao_factor-rehab_used,\"GATE-VAL FAIL — no MAO\")", USD_FMT, bold=True)
+set_formula(ws, "B10", "=IF(gate_val_pass,arv_used*mao_factor-rehab_used,\"GATE-VAL FAIL — no MAO\")", USD_FMT, bold=True)
 ws.cell(row=11, column=1).value = "65% Wholesale MAO"
-set_formula(ws, "B11", "=IF(gate_val_pass,arv*wholesale_factor-rehab_used,\"GATE-VAL FAIL\")", USD_FMT)
+set_formula(ws, "B11", "=IF(gate_val_pass,arv_used*wholesale_factor-rehab_used,\"GATE-VAL FAIL\")", USD_FMT)
 ws.cell(row=12, column=1).value = "1% Rule (rent/price)"
 set_formula(ws, "B12", "=IF(asking_price>0,rent_estimate/asking_price,0)", PCT_FMT)
 ws.cell(row=13, column=1).value = "GRM (price/gross annual rent)"
@@ -639,12 +664,9 @@ set_formula(ws, "B14", "=IF(asking_price>0,(rent_estimate*12*(1-vacancy_rate)*(1
 subheader(ws, 16, "VERDICT")
 ws.cell(row=17, column=1).value = "Deal verdict"
 set_formula(ws, "B17", '=IF(NOT(gate_val_pass),"FAIL — GATE-VAL rejected ARV",IF(asking_price<=B10,"PASS — asking <= MAO",IF(B12>=0.01,"PASS — 1% rule met",IF(B14>=cap_rate_bench,"PASS — cap rate above benchmark","MARGINAL — review"))))', bold=True)
-ws.conditional_formatting.add("B17",
-    CellIsRule(operator="containsText", formula=['"PASS"'], fill=GATE_PASS))
-ws.conditional_formatting.add("B17",
-    CellIsRule(operator="containsText", formula=['"FAIL"'], fill=GATE_FAIL))
-ws.conditional_formatting.add("B17",
-    CellIsRule(operator="containsText", formula=['"MARGINAL"'], fill=GATE_WARN))
+add_text_rule(ws, "B17", "PASS", GATE_PASS)
+add_text_rule(ws, "B17", "FAIL", GATE_FAIL)
+add_text_rule(ws, "B17", "MARGINAL", GATE_WARN)
 
 ws.cell(row=18, column=1).value = "Binding constraint"
 set_formula(ws, "B18", '=IF(NOT(gate_val_pass),"ARV provenance",IF(asking_price>B10,"Price > MAO",IF(B12<0.01,"1% rule",IF(B14<cap_rate_bench,"Cap rate","None"))))')
@@ -677,7 +699,8 @@ set_formula(ws, "B10", "=B5+B6+B7+B8+B9", USD_FMT, bold=True)
 ws.cell(row=12, column=1).value = "FINANCING"
 ws.cell(row=12, column=1).font = BOLD
 ws.cell(row=13, column=1).value = "Hard money loan (min of ARV-LTV, LTC)"
-set_formula(ws, "B13", "=MIN(arv*hm_arv_ltv,(purchase_price+rehab_used)*hm_ltc)", USD_FMT)
+# Gated: loan sizing uses the approved ARV (audit H8), loud text when gate fails
+set_formula(ws, "B13", '=IF(gate_val_pass,MIN(arv_used*hm_arv_ltv,(purchase_price+rehab_used)*hm_ltc),"GATE-VAL FAIL")', USD_FMT)
 add_name(wb, "hm_loan", "'Fix-and-Flip'!$B$13")
 ws.cell(row=14, column=1).value = "Equity required"
 set_formula(ws, "B14", "=B10-B13", USD_FMT, bold=True)
@@ -728,11 +751,13 @@ set_link(ws, "B46", "=equity_flip", USD_FMT)
 # Break-evens
 subheader(ws, 48, "BREAK-EVENS")
 ws.cell(row=49, column=1).value = "Break-even ARV"
-set_formula(ws, "B49", "=B5+B6+B7+B8+B31+B9+B5*sell_closing_pct/(1-sell_closing_pct)", USD_FMT)
+# Algebra fix: the sale price that covers all costs net of sell-side closing is
+# already computed in B50; break-even ARV is exactly that value.
+set_formula(ws, "B49", "=B50", USD_FMT)
 ws.cell(row=50, column=1).value = "Break-even sale price (incl. sell costs)"
 set_formula(ws, "B50", "=(B5+B6+B7+B8+B31+B9)/(1-sell_closing_pct)", USD_FMT)
 ws.cell(row=51, column=1).value = "MAO (70% rule)"
-set_formula(ws, "B51", "=IF(gate_val_pass,arv*mao_factor-rehab_used,\"GATE-VAL FAIL\")", USD_FMT, bold=True)
+set_formula(ws, "B51", "=IF(gate_val_pass,arv_used*mao_factor-rehab_used,\"GATE-VAL FAIL\")", USD_FMT, bold=True)
 
 print("Fix-and-Flip tab built")
 
@@ -786,24 +811,26 @@ ws.cell(row=20, column=1).value = "% capital recycled"
 set_formula(ws, "B20", "=IF(B6>0,(B6-B19)/B6,0)", PCT_FMT, bold=True)
 ws.cell(row=21, column=1).value = "Infinite return flag (cash left in <= 0)"
 set_formula(ws, "B21", '=IF(B19<=0,"YES — infinite return","No")', bold=True)
-ws.conditional_formatting.add("B21",
-    CellIsRule(operator="containsText", formula=['"YES"'], fill=GATE_PASS))
+add_text_rule(ws, "B21", "YES", GATE_PASS)
 
 subheader(ws, 23, "PHASE 4: ONGOING RENTAL CASH FLOW")
 ws.cell(row=24, column=1).value = "Annual cash flow (post-refi)"
-set_formula(ws, "B24", "=B12-B13", USD_FMT)
+# B13 is a PMT-based outflow and therefore negative; cash flow = NOI + debt
+# service (same convention as the Rental DCF: =F+G).
+set_formula(ws, "B24", "=B12+B13", USD_FMT)
 ws.cell(row=25, column=1).value = "Cash-on-cash (on trapped capital)"
 set_formula(ws, "B25", "=IF(B19>0,B24/B19,0)", PCT_FMT, bold=True)
 
 subheader(ws, 27, "VERDICT")
 ws.cell(row=28, column=1).value = "BRRRR verdict"
-set_formula(ws, "B28", '=IF(NOT(gate_val_pass),"FAIL — GATE-VAL",IF(B19<=0,"Refinance-Feasible (infinite return)",IF(B14>=min_dscr,"Refinance-Feasible","Sell-Only — DSCR too low")))', bold=True)
-ws.conditional_formatting.add("B28",
-    CellIsRule(operator="containsText", formula=['"Feasible"'], fill=GATE_PASS))
-ws.conditional_formatting.add("B28",
-    CellIsRule(operator="containsText", formula=['"FAIL"'], fill=GATE_FAIL))
-ws.conditional_formatting.add("B28",
-    CellIsRule(operator="containsText", formula=['"Sell-Only"'], fill=GATE_WARN))
+# Gate order: GATE-VAL fail first, then the DSCR gate (B14 < min_dscr → Sell-Only),
+# then the infinite-return branch (B19 <= 0), else Refinance-Feasible. DSCR must
+# be evaluated before the infinite-return claim — a deal that cannot cover debt
+# service is not refinanceable at any cash-left-in level.
+set_formula(ws, "B28", '=IF(NOT(gate_val_pass),"FAIL — GATE-VAL",IF(B14<min_dscr,"Sell-Only — DSCR too low",IF(B19<=0,"Refinance-Feasible (infinite return)","Refinance-Feasible")))', bold=True)
+add_text_rule(ws, "B28", "Feasible", GATE_PASS)
+add_text_rule(ws, "B28", "FAIL", GATE_FAIL)
+add_text_rule(ws, "B28", "Sell-Only", GATE_WARN)
 
 print("BRRRR tab built")
 
@@ -865,7 +892,7 @@ ws.cell(row=r+3, column=1).value = "Less: Sell closing costs"
 set_formula(ws, f"B{r+3}", f"=-B{r+2}*sell_closing_pct", USD_FMT)
 ws.cell(row=r+4, column=1).value = "Less: Loan payoff"
 set_formula(ws, f"B{r+4}", f"=-B7+PMT(dscr_rate/12,B9*12,B7)*12*5", USD_FMT)
-# ponytail: loan payoff simplified — principal after 5 years of payments
+# Amortized balance after the 5-year hold (60 months of payments)
 set_formula(ws, f"B{r+4}", f"=-B7*(1+dscr_rate/12)^60+PMT(dscr_rate/12,B9*12,B7)/dscr_rate*12*((1+dscr_rate/12)^60-1)", USD_FMT)
 ws.cell(row=r+5, column=1).value = "Net reversion"
 set_formula(ws, f"B{r+5}", f"=B{r+2}+B{r+3}+B{r+4}", USD_FMT, bold=True)
@@ -920,7 +947,10 @@ ws.cell(row=4, column=1).value = "Bid amount"
 set_input(ws, "B4", 100000, "Source: winning bid at tax sale", USD_FMT)
 add_name(wb, "tax_bid", "'Tax-Deed'!$B$4")
 ws.cell(row=5, column=1).value = "Deed recording date"
-set_input(ws, "B5", "2026-01-01", "Source: date deed filed for record", DATE_FMT)
+recording_date = parse_date_any("2026-01-01")
+if recording_date is None:
+    raise ValueError("Seeded deed recording date is unparseable")
+set_input(ws, "B5", recording_date, "Source: date deed filed for record", DATE_FMT)
 ws.cell(row=6, column=1).value = "Redemption class"
 dv3 = DataValidation(type="list", formula1='"Homestead/Ag,Other"', allow_blank=False)
 ws.add_data_validation(dv3)
@@ -1008,10 +1038,8 @@ ws.cell(row=14, column=1).value = "Max contract price"
 set_link(ws, "B14", "=B11", USD_FMT)
 ws.cell(row=15, column=1).value = "Buyer clears 70%?"
 set_formula(ws, "B15", '=IF(B4+B7<=B12,"YES","NO — end buyer doesn\'t clear 70%")', bold=True)
-ws.conditional_formatting.add("B15",
-    CellIsRule(operator="containsText", formula=['"YES"'], fill=GATE_PASS))
-ws.conditional_formatting.add("B15",
-    CellIsRule(operator="containsText", formula=['"NO"'], fill=GATE_FAIL))
+add_text_rule(ws, "B15", "YES", GATE_PASS)
+add_text_rule(ws, "B15", "NO", GATE_FAIL)
 
 subheader(ws, 17, "ASSIGNMENT vs DOUBLE-CLOSE")
 ws.cell(row=18, column=1).value = "Assignment fee"
@@ -1029,10 +1057,8 @@ dv4.add("B23")
 set_input(ws, "B23", "No", "Source: TX Prop. Code §5.0205 — required since Jan 2024")
 ws.cell(row=24, column=1).value = "Compliance verdict"
 set_formula(ws, "B24", '=IF(B23="Yes","PASS — compliant","BLOCKED — bilateral disclosure required (SB 1577)")', bold=True)
-ws.conditional_formatting.add("B24",
-    CellIsRule(operator="containsText", formula=['"PASS"'], fill=GATE_PASS))
-ws.conditional_formatting.add("B24",
-    CellIsRule(operator="containsText", formula=['"BLOCKED"'], fill=GATE_FAIL))
+add_text_rule(ws, "B24", "PASS", GATE_PASS)
+add_text_rule(ws, "B24", "BLOCKED", GATE_FAIL)
 
 print("Wholesale tab built")
 
@@ -1060,16 +1086,16 @@ add_name(wb, "eviction_cost", "'Auction Bid'!$B$8")
 
 subheader(ws, 10, "BID CEILING")
 ws.cell(row=11, column=1).value = "MAO (70% rule)"
-set_formula(ws, "B11", "=IF(gate_val_pass,arv*mao_factor-B5,\"GATE-VAL FAIL\")", USD_FMT)
+set_formula(ws, "B11", "=IF(gate_val_pass,arv_used*mao_factor-B5,\"GATE-VAL FAIL\")", USD_FMT)
 ws.cell(row=12, column=1).value = "ARV-adjusted ceiling (ARV×factor − rehab − liens)"
-set_formula(ws, "B12", "=IF(gate_val_pass,arv*mao_factor-B5-B7-B8,\"GATE-VAL FAIL\")", USD_FMT)
+set_formula(ws, "B12", "=IF(gate_val_pass,arv_used*mao_factor-B5-B7-B8,\"GATE-VAL FAIL\")", USD_FMT)
 ws.cell(row=13, column=1).value = "Bid ceiling = min(MAO, cash, ARV-adjusted)"
 set_formula(ws, "B13", "=IF(gate_val_pass,MIN(B11,B6,B12),0)", USD_FMT, bold=True)
 add_name(wb, "bid_ceiling", "'Auction Bid'!$B$13")
 ws.cell(row=14, column=1).value = "Walk-away (105% of ceiling)"
 set_formula(ws, "B14", "=B13*1.05", USD_FMT)
 ws.cell(row=15, column=1).value = "Surviving-lien-adjusted margin"
-set_formula(ws, "B15", "=IF(gate_val_pass,(arv-B13-B5-B7-B8)/arv,0)", PCT_FMT)
+set_formula(ws, "B15", '=IF(gate_val_pass,(arv_used-B13-B5-B7-B8)/arv_used,"GATE-VAL FAIL")', PCT_FMT)
 
 ws.cell(row=17, column=1).value = "⚠ No financing, no inspection, no title insurance at sale"
 ws.cell(row=17, column=1).font = Font(bold=True, color="FF0000")
@@ -1153,22 +1179,26 @@ for i, ad in enumerate(arv_axis):
             f"=IF(gate_val_pass,(arv*(1+{ad}))-(purchase_price)-(rehab_used*(1+{rd}))-(hold_months*(insurance_annual/12+tax_rate*purchase_price/12+200))-(hm_loan*hm_rate/12*hold_months)-(hm_loan*hm_points)-(purchase_price*buy_closing_pct)-((arv*(1+{ad}))*sell_closing_pct),\"GATE-VAL FAIL\")",
             USD_FMT)
 
-# Highlight center cell (base case)
-center_row = 6 + len(arv_axis) // 2
-center_col = 2 + len(rehab_axis) // 2
+# Highlight center cell (base case): locate the 0 on each axis instead of
+# len//2 arithmetic — with a 4-wide rehab axis that arithmetic pointed one
+# column right of base (+10% rehab).
+center_row = 6 + arv_axis.index(0.00)
+center_col = 2 + rehab_axis.index(0.00)
 ws.cell(row=center_row, column=center_col).fill = CENTER_FILL
 ws.cell(row=center_row, column=center_col).font = BOLD
 
 # Optimistic-only flag
 r = 6 + len(arv_axis) + 2
 ws.cell(row=r, column=1).value = "Optimistic-only flag"
+flag_base_cell = f"{get_column_letter(2 + rehab_axis.index(0.00))}{6 + arv_axis.index(0.00)}"
+flag_best_cell = f"{get_column_letter(2 + rehab_axis.index(-0.10))}{6 + len(arv_axis) - 1}"
+at_below_range = f"{get_column_letter(2)}6:{get_column_letter(1 + len(rehab_axis))}{6 + arv_axis.index(0.00)}"
+n_at_below_cells = (arv_axis.index(0.00) + 1) * len(rehab_axis)
 set_formula(ws, f"B{r}",
-    f'=IF(AND({get_column_letter(1)}{6+0}="0",FALSE),"",IF(SUMPRODUCT(({get_column_letter(2)}{6}:{get_column_letter(5)}{6}<=0)*1)=4,"YES — pencils only at optimistic ARV","No — pencils at or below base"))',
+    f'=IF(AND({flag_base_cell}>0,SUMPRODUCT(({at_below_range}<=0)*1)={n_at_below_cells},{flag_best_cell}>0),"YES — pencils only at optimistic ARV","No — pencils at or below base")',
     bold=True)
-ws.conditional_formatting.add(f"B{r}",
-    CellIsRule(operator="containsText", formula=['"YES"'], fill=GATE_FAIL))
-ws.conditional_formatting.add(f"B{r}",
-    CellIsRule(operator="containsText", formula=['"No"'], fill=GATE_PASS))
+add_text_rule(ws, f"B{r}", "YES", GATE_FAIL)
+add_text_rule(ws, f"B{r}", "No", GATE_PASS)
 
 # Scenario toggle
 r += 2
@@ -1247,10 +1277,8 @@ ws.cell(row=4, column=1).value = "Test: change ARV -5% on Comp & ARV tab"
 ws.cell(row=5, column=1).value = "Expected: all downstream outputs recalculate"
 ws.cell(row=6, column=1).value = "Status"
 set_formula(ws, "B6", '=IF(ISNUMBER(net_profit_flip),"PASS — formula-driven","CHECK — open in Excel to verify")', bold=True)
-ws.conditional_formatting.add("B6",
-    CellIsRule(operator="containsText", formula=['"PASS"'], fill=GATE_PASS))
-ws.conditional_formatting.add("B6",
-    CellIsRule(operator="containsText", formula=['"FAIL"'], fill=GATE_FAIL))
+add_text_rule(ws, "B6", "PASS", GATE_PASS)
+add_text_rule(ws, "B6", "FAIL", GATE_FAIL)
 
 subheader(ws, 8, "GATE-VAL VERIFICATION")
 ws.cell(row=9, column=1).value = "GATE-VAL blocks when source = assessed_only"
@@ -1262,14 +1290,17 @@ subheader(ws, 12, "BALANCE CHECKS")
 ws.cell(row=13, column=1).value = "Flip S&U ties (uses = sources)"
 set_formula(ws, "B13", '=IF(ABS(\'Fix-and-Flip\'!B10-(\'Fix-and-Flip\'!B13+\'Fix-and-Flip\'!B14))<1,"PASS","FAIL")', bold=True)
 ws.cell(row=14, column=1).value = "GATE-VAL is live (not a comment)"
-# ponytail: ISFORMULA() not supported in LibreOffice — check if cell contains a formula string
+# ISFORMULA() is not supported in LibreOffice, so check the rendered verdict
+# prefix of the live GATE-VAL formula cell instead.
 set_formula(ws, "B14", '=IF(OR(LEFT(\'Comp & ARV\'!B22,4)="PASS",LEFT(\'Comp & ARV\'!B22,4)="FAIL",LEFT(\'Comp & ARV\'!B22,4)="WARN"),"PASS — live formula","FAIL — check GATE-VAL")', bold=True)
 
 subheader(ws, 16, "SEEDED BAD DEAL TEST")
 ws.cell(row=17, column=1).value = "Test: set comp_source to assessed_only"
 ws.cell(row=18, column=1).value = "Expected: GATE-VAL = FAIL, MAO blanked"
 ws.cell(row=19, column=1).value = "Flip MAO shows GATE-VAL FAIL?"
-set_formula(ws, "B19", '=IF(ISERROR(FIND("GATE-VAL FAIL",\'Fix-and-Flip\'!B51)),"FAIL — MAO not blocked","PASS — MAO blocked")', bold=True)
+# Only meaningful in the seeded-bad-deal state — mirror the neighboring
+# GATE-VERIFICATION cells and stay neutral until comp_source = assessed_only.
+set_formula(ws, "B19", '=IF(comp_source="assessed_only",IF(ISERROR(FIND("GATE-VAL FAIL",\'Fix-and-Flip\'!B51)),"FAIL — MAO not blocked","PASS — MAO blocked"),"Set comp_source to assessed_only to test")', bold=True)
 
 print("Checks tab built")
 
@@ -1379,6 +1410,8 @@ print("XIRR blocks added")
 # CHARTS — add to Fix-and-Flip, Sensitivity, Portfolio
 # ============================================================
 from openpyxl.chart import BarChart, LineChart, Reference, Series
+from openpyxl.chart.series import SeriesLabel
+from openpyxl.chart.data_source import StrRef
 
 # Fix-and-Flip: monthly cash flow / spend curve
 ws_ff = wb["Fix-and-Flip"]
@@ -1399,7 +1432,6 @@ chart_sens = BarChart()
 chart_sens.title = "Scenario Net Profit: Base vs Bull vs Bear"
 chart_sens.style = 10
 # Reference the scenario profit cells — they're computed in the scenario toggle section
-# ponytail: chart references may need adjustment after recalc; position is approximate
 ws_sens.add_chart(chart_sens, "G3")
 
 # Portfolio: returns bar chart
@@ -1407,10 +1439,16 @@ ws_port = wb["Portfolio"]
 chart_port = BarChart()
 chart_port.title = "Deal Metrics vs Benchmark"
 chart_port.style = 12
+# Series alignment fix: titles_from_data=False keeps the value count equal to
+# the category count — B5:B13 is 9 values against 9 category labels A5:A13.
+# (With titles_from_data=True the first data cell, B5, was consumed as the
+# series title, leaving 8 values plotted against 9 categories.) The series is
+# named explicitly from the B4 header instead of consuming a data row.
 data = Reference(ws_port, min_col=2, min_row=5, max_col=2, max_row=13)
 cats = Reference(ws_port, min_col=1, min_row=5, max_row=13)
-chart_port.add_data(data, titles_from_data=True)
+chart_port.add_data(data, titles_from_data=False)
 chart_port.set_categories(cats)
+chart_port.series[0].tx = SeriesLabel(strRef=StrRef("'Portfolio'!$B$4"))
 ws_port.add_chart(chart_port, "E3")
 
 print("Charts added")
@@ -1436,10 +1474,10 @@ print("Print areas set")
 # ============================================================
 # SAVE
 # ============================================================
-out_dir = Path("/Users/knaidu/Documents/Hardline/Projects/reorealestate/out")
-out_dir.mkdir(exist_ok=True)
-output_path = out_dir / "HERMES-REO_Model_Suite.xlsx"
-wb.save(str(output_path))
+out_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), "out")
+os.makedirs(out_dir, exist_ok=True)
+output_path = os.path.join(out_dir, "HERMES-REO_Model_Suite.xlsx")
+wb.save(output_path)
 print(f"\n✓ Workbook saved: {output_path}")
 print(f"  Tabs: {len(wb.sheetnames)} — {', '.join(wb.sheetnames)}")
 print(f"  Named ranges: {len(list(wb.defined_names))}")
