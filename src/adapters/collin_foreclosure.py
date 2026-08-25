@@ -6,10 +6,18 @@ The only way to get listings is to intercept window.setProperties in Playwright.
 Detail pages are accessible via plain HTTP (urllib/httpx) once you have the entryID.
 
 Source: /Users/knaidu/Documents/antigravity/lucid-noether/foreclosure_crawler.py
+
+FIXES:
+- M3/S5: browser close guaranteed via try/finally; the SignalR interceptor
+  no longer swallows errors from the wrapped setProperties; a missing
+  Chromium raises RuntimeError with the manual install command instead of
+  running os.system("playwright install ...") from library code.
+- S6: failed detail scrapes are flagged on the lead (raw_data
+  details_status="error") so downstream can skip error payloads instead of
+  mistaking them for parsed data.
 """
 from __future__ import annotations
 import asyncio
-import json
 import time
 import urllib.request
 import urllib.error
@@ -21,11 +29,29 @@ from .base import SourceAdapter, NormalizedLead, SourceProvenance
 BASE_URL = "https://apps2.collincountytx.gov/ForeclosureNotices"
 UA = "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
 
+DETAILS_STATUS_OK = "ok"
+DETAILS_STATUS_ERROR = "error"
+
 
 def _clean(text: str) -> str:
     if not text:
         return "Unknown"
     return " ".join(text.split()).strip()
+
+
+# Blazor SignalR interceptor. The original wrapped callback is invoked
+# WITHOUT a swallowing try/catch so its failures surface as Playwright
+# evaluate errors instead of being silently eaten inside the page.
+_INTERCEPTOR_JS = """
+    window.myItemsData = null;
+    if (typeof window.setProperties === 'function') {
+        const originalSetProperties = window.setProperties;
+        window.setProperties = function(myItems) {
+            window.myItemsData = myItems;
+            originalSetProperties(myItems);
+        };
+    }
+"""
 
 
 async def _get_foreclosure_list(limit: int | None = None) -> list[dict]:
@@ -38,43 +64,37 @@ async def _get_foreclosure_list(limit: int | None = None) -> list[dict]:
     async with async_playwright() as p:
         try:
             browser = await p.chromium.launch(headless=True)
-        except Exception:
-            import os
-            os.system("playwright install chromium")
-            browser = await p.chromium.launch(headless=True)
+        except Exception as e:
+            raise RuntimeError(
+                "Chromium is not available to Playwright. Install it manually "
+                "with: `playwright install chromium` "
+                "(or `.venv/bin/python -m playwright install chromium`)."
+            ) from e
 
         page = await browser.new_page()
-        await page.goto(BASE_URL, timeout=60000)
+        try:
+            await page.goto(BASE_URL, timeout=60000)
 
-        # Intercept the Blazor data push
-        await page.evaluate("""
-            window.myItemsData = null;
-            if (typeof window.setProperties === 'function') {
-                const originalSetProperties = window.setProperties;
-                window.setProperties = function(myItems) {
-                    window.myItemsData = myItems;
-                    try { originalSetProperties(myItems); } catch (err) {}
-                };
-            }
-        """)
+            # Intercept the Blazor data push (errors surface, never swallowed)
+            await page.evaluate(_INTERCEPTOR_JS)
 
-        # Poll for data (up to 10 seconds)
-        captured = None
-        for _ in range(20):
-            await asyncio.sleep(0.5)
-            data = await page.evaluate("window.myItemsData")
-            if data is not None:
-                captured = data
-                break
+            # Poll for data (up to 10 seconds)
+            captured = None
+            for _ in range(20):
+                await asyncio.sleep(0.5)
+                data = await page.evaluate("window.myItemsData")
+                if data is not None:
+                    captured = data
+                    break
+        finally:
+            await browser.close()
 
-        await browser.close()
+    if not captured:
+        raise RuntimeError("Failed to retrieve listings from Blazor SignalR socket.")
 
-        if not captured:
-            raise RuntimeError("Failed to retrieve listings from Blazor SignalR socket.")
-
-        if limit:
-            captured = captured[:limit]
-        return captured
+    if limit:
+        captured = captured[:limit]
+    return captured
 
 
 def _scrape_detail_page(entry_id: int) -> dict:
@@ -83,6 +103,10 @@ def _scrape_detail_page(entry_id: int) -> dict:
     Ported from lucid-noether foreclosure_crawler.py lines 86-159.
     Detail pages are plain HTTP (not Blazor) — accessible via urllib.
     Uses BeautifulSoup to parse MudBlazor grid layout.
+
+    On fetch failure returns {"error": <message>} — callers MUST treat any
+    dict containing an "error" key as a failure payload, not parsed data
+    (see _details_status / finding S6).
     """
     url = f"{BASE_URL}/DetailPage/{entry_id}"
     req = urllib.request.Request(url, headers={"User-Agent": UA})
@@ -90,6 +114,8 @@ def _scrape_detail_page(entry_id: int) -> dict:
     try:
         with urllib.request.urlopen(req, timeout=10) as resp:
             html = resp.read()
+    except urllib.error.HTTPError as e:
+        return {"error": f"HTTP {e.code} fetching {url}: {e.reason}"}
     except Exception as e:
         return {"error": str(e)}
 
@@ -142,6 +168,17 @@ def _scrape_detail_page(entry_id: int) -> dict:
     return details
 
 
+def _details_status(details: object) -> str:
+    """Classify a detail scrape result (finding S6).
+
+    Payloads containing an "error" key are failure markers, NOT data — they
+    get details_status="error" so downstream can skip them.
+    """
+    if isinstance(details, dict) and "error" in details:
+        return DETAILS_STATUS_ERROR
+    return DETAILS_STATUS_OK
+
+
 class CollinForeclosureAdapter(SourceAdapter):
     """Collin County foreclosure-notice portal adapter."""
     channel = "foreclosure_notice"
@@ -153,6 +190,10 @@ class CollinForeclosureAdapter(SourceAdapter):
         Args:
             limit: Max number of listings to retrieve (None = all).
             extract_details: If True, fetch detail pages for each listing.
+                Leads whose detail scrape failed carry raw_data
+                details_status="error" plus details_error; enrichment should
+                skip those payloads (flagging lives here, consuming it does
+                not — finding S6).
         """
         listings = asyncio.run(_get_foreclosure_list(limit))
         leads = []
@@ -176,7 +217,12 @@ class CollinForeclosureAdapter(SourceAdapter):
             if extract_details and entry_id:
                 time.sleep(1.0)  # rate limit — plain sleep, not asyncio
                 details = _scrape_detail_page(entry_id)
+                lead.raw_data["details_status"] = _details_status(details)
                 lead.raw_data["details"] = details
+                if lead.raw_data["details_status"] == DETAILS_STATUS_ERROR:
+                    print(f"Collin foreclosure: detail scrape FAILED for "
+                          f"entry {entry_id} ({details.get('error')}) — flagged "
+                          f"raw_data.details_status='error', do not consume")
 
             leads.append(lead)
 
@@ -187,6 +233,50 @@ class CollinForeclosureAdapter(SourceAdapter):
 
 
 if __name__ == "__main__":
+    import ast
+    import inspect
+    from src.adapters.base import NormalizedLead
+
+    # Self-check (S6): error payloads are classified, ok data passes through
+    assert _details_status({"error": "HTTP 500"}) == DETAILS_STATUS_ERROR
+    assert _details_status({"property_info": {"Address": "1 Main St"}}) == DETAILS_STATUS_OK
+    assert _details_status({"detail_page_url": "x"}) == DETAILS_STATUS_OK
+    assert _details_status(None) == DETAILS_STATUS_OK
+    print("collin_foreclosure.py: PASS — error dicts flagged details_status='error'")
+
+    # Self-check (S6): flagging wires onto a real lead object shape
+    lead = NormalizedLead(county="collin", parcel_id="4003592",
+                          channel="foreclosure_notice", situs_address="1 Test St",
+                          raw_data={"entry_id": 4003592})
+    fake_error_payload = {"error": "connection refused"}
+    lead.raw_data["details_status"] = _details_status(fake_error_payload)
+    lead.raw_data["details"] = fake_error_payload
+    assert lead.raw_data["details_status"] == DETAILS_STATUS_ERROR
+    assert "error" in lead.raw_data["details"]
+    print("collin_foreclosure.py: PASS — lead.raw_data carries details_status flag")
+
+    # Self-check (M3): no os.system playwright-install in library code; the
+    # failure path instructs the manual command instead.
+    list_src = inspect.getsource(_get_foreclosure_list)
+    tree = ast.parse(list_src)
+    os_system_calls = [
+        node for node in ast.walk(tree)
+        if isinstance(node, ast.Call)
+        and isinstance(node.func, ast.Attribute)
+        and node.func.attr == "system"
+    ]
+    assert not os_system_calls, \
+        "M3 regression: os.system(...) found in library code again"
+    assert "finally:" in list_src and "await browser.close()" in list_src.split("finally:")[-1], \
+        "M3 regression: browser.close() not guarded by finally"
+    assert "playwright install chromium" in list_src, \
+        "M3 regression: manual install instruction missing from RuntimeError"
+    # Interceptor must invoke the wrapped callback without a swallowing catch
+    assert "catch (err)" not in _INTERCEPTOR_JS, \
+        "M3/S5 regression: interceptor swallows setProperties errors again"
+    print("collin_foreclosure.py: PASS — no os.system install; close-in-finally; "
+          "interceptor surfaces errors; manual install command documented")
+
     # Self-check: detail page parser on a known entry_id from lucid-noether data
     # Use entry_id 4003592 (verified in prior scrape)
     details = _scrape_detail_page(4003592)

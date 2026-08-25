@@ -10,9 +10,11 @@ portal is confirmed down, falls back to the county sheriff's office page.
 """
 from __future__ import annotations
 import asyncio
+import ast
+import inspect
 import re
 from bs4 import BeautifulSoup
-from playwright.async_api import async_playwright
+from playwright.async_api import async_playwright, Error as PlaywrightError
 
 from .base import SourceAdapter, NormalizedLead, SourceProvenance
 
@@ -33,20 +35,21 @@ UA = "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36"
 async def _try_tax_sale_portal() -> list[dict]:
     """Try the Grayson tax sale portal via Playwright.
 
-    The portal may require a self-signed cert acceptance or may be down.
+    Only URLs actually defined in this module are tried (finding S1b: a
+    reference to the never-defined TAX_SALE_HTTP_URL used to raise NameError
+    that a broad except swallowed as "portal down"). TLS verification stays
+    enabled — no certificate-error bypass launch args (finding N1).
+
     Returns list of sale properties or empty list.
     """
     properties = []
 
     async with async_playwright() as p:
-        browser = await p.chromium.launch(headless=True, args=[
-            "--ignore-certificate-errors",  # taxsearch uses self-signed cert on :8443
-        ])
+        browser = await p.chromium.launch(headless=True)
         page = await browser.new_page()
 
         try:
-            # Try HTTPS first, then HTTP
-            for url in [TAX_SALE_URL, TAX_SALE_HTTP_URL]:
+            for url in [TAX_SALE_URL]:
                 try:
                     await page.goto(url, timeout=15000)
                     await page.wait_for_load_state("domcontentloaded", timeout=10000)
@@ -55,10 +58,10 @@ async def _try_tax_sale_portal() -> list[dict]:
                         properties = _parse_tax_sale_page(html)
                         if properties:
                             break
-                except Exception:
+                except (PlaywrightError, OSError, asyncio.TimeoutError):
                     continue
 
-        except Exception as e:
+        except (PlaywrightError, OSError, asyncio.TimeoutError) as e:
             print(f"Grayson tax sale portal error: {e}")
         finally:
             await browser.close()
@@ -80,7 +83,7 @@ async def _try_county_page() -> list[dict]:
             html = await page.content()
             properties = _parse_county_tax_page(html)
 
-        except Exception as e:
+        except (PlaywrightError, OSError, asyncio.TimeoutError) as e:
             print(f"Grayson county page error: {e}")
         finally:
             await browser.close()
@@ -198,6 +201,23 @@ if __name__ == "__main__":
     assert "123 Main" in props[0]["address"]
     assert props[0]["sale_date"] == "2026-09-01"
 
+    # Self-check: no TLS-bypass launch args (finding N1) and no reference to
+    # the never-defined TAX_SALE_HTTP_URL (finding S1b) in portal CODE.
+    portal_src = inspect.getsource(_try_tax_sale_portal)
+    tree = ast.parse(portal_src)
+    func_def = tree.body[0]
+    doc = ast.get_docstring(func_def) or ""
+    code_src = portal_src.replace(doc, "")
+    assert "ignore-certificate-errors" not in code_src.lower(), \
+        "N1 regression: certificate-error bypass reintroduced"
+    code_names = {n.id for n in ast.walk(tree) if isinstance(n, ast.Name)}
+    assert "TAX_SALE_HTTP_URL" not in code_names, \
+        "S1b regression: undefined TAX_SALE_HTTP_URL referenced again"
+    bare_excepts = [n for n in ast.walk(tree)
+                    if isinstance(n, ast.ExceptHandler) and n.type is None]
+    assert not bare_excepts, \
+        "S1b regression: broad except would swallow programming errors again"
+
     print("grayson_tax.py: all self-checks passed")
-    print("grayson_tax.py: live search requires Playwright with --ignore-certificate-errors")
-    print("grayson_tax.py: tax sale portal at :8443 was unreachable via curl — browser fallback built")
+    print("grayson_tax.py: live search requires Playwright; TLS verification stays ON")
+    print("grayson_tax.py: tax sale portal at :8443 is DNS NXDOMAIN — county fallback only")

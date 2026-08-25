@@ -5,9 +5,9 @@ Exports foreclosure properties as GeoJSON points with investment categories,
 marker colors/symbols, and census tract overlay for field operations.
 """
 from __future__ import annotations
-import json
 import re
 import statistics
+from ..io_utils import write_json
 from .route_optimizer import RouteStop
 
 
@@ -106,10 +106,9 @@ def cpr_to_geojson(cprs: list) -> dict:
 
 
 def export_geojson(cprs: list, output_path: str) -> int:
-    """Export CPRs to a GeoJSON file. Returns feature count."""
+    """Export CPRs to a GeoJSON file atomically (src.io_utils). Returns feature count."""
     geojson = cpr_to_geojson(cprs)
-    with open(output_path, "w") as f:
-        json.dump(geojson, f, indent=2, default=str)
+    write_json(output_path, geojson, default=str)
     return len(geojson["features"])
 
 

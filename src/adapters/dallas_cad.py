@@ -19,6 +19,111 @@ DCAD_URL = "https://www.dallascad.org/SearchAddr.aspx"
 UA = "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
 
 
+# --- R2: echo-back verification ---------------------------------------------
+# DCAD search results must be verified against the queried address before any
+# property characteristics are attached: the ASP.NET grid sometimes echoes back
+# a *different* property (same street name, different number/city), and
+# silently attaching its sqft/beds/baths corrupts underwriting inputs.
+
+_ECHO_COMPONENTS = ("street_number", "street_name_first", "zip5")
+
+# Zip lives in the tail segment ("..., ADDISON, TX 75001-6334"); anchor at end
+# so we never grab a year or account number instead.
+_ZIP5_RE = re.compile(r"\b(\d{5})(?:-\d{4})?\s*$")
+
+# Detail-page labels that introduce the displayed situs address, most-specific first.
+_DISPLAYED_ADDRESS_LABELS = (
+    re.compile(r"Situs\s+Address\b[:\s]*(.+)", re.IGNORECASE),
+    re.compile(r"Property\s+Address\b[:\s]*(.+)", re.IGNORECASE),
+)
+_FALLBACK_ADDR_LINE_RE = re.compile(
+    r"^\d+\s+[A-Za-z].*\bTX\b.*\d{5}", re.IGNORECASE
+)
+
+
+def _address_tokens(address: str) -> dict | None:
+    """Split an address into the tokens used for echo comparison.
+
+    Returns {'street_number', 'street_name_first', 'zip5'}; a component is None
+    when absent from the input. Returns None for an empty address.
+    """
+    if not address or not str(address).strip():
+        return None
+    raw = str(address).strip()
+    first_segment = raw.split(",")[0].strip()
+    m = re.match(r"^(\d+)\s+(\S+)", first_segment)
+    zip_match = _ZIP5_RE.search(raw.upper())
+    return {
+        "street_number": m.group(1) if m else None,
+        "street_name_first": m.group(2).upper() if m else None,
+        "zip5": zip_match.group(1) if zip_match else None,
+    }
+
+
+def _extract_displayed_address(soup) -> str:
+    """Best-effort extraction of the address displayed on a DCAD page."""
+    if soup is None:
+        return ""
+    text = soup.get_text("\n")
+    for label_re in _DISPLAYED_ADDRESS_LABELS:
+        m = label_re.search(text)
+        candidate = m.group(1).strip().strip(":").strip() if m else ""
+        if candidate:
+            return candidate
+    for line in text.splitlines():
+        line = line.strip()
+        if _FALLBACK_ADDR_LINE_RE.match(line):
+            return line
+    return ""
+
+
+def _verify_echo(query_address: str, displayed_address: str) -> tuple[bool, str]:
+    """Compare the queried address against the detail-page displayed address.
+
+    Normalized token compare over street-number, street-name-first-token and
+    zip5: at least 2 of those components must match. Returns (ok,
+    match_quality) where match_quality is 'exact' when all three components are
+    present on both sides and match, 'partial' otherwise.
+    """
+    query = _address_tokens(query_address)
+    shown = _address_tokens(displayed_address)
+    if not query or not shown:
+        return False, "unverifiable"
+    comparable = matches = 0
+    for component in _ECHO_COMPONENTS:
+        qv, dv = query[component], shown[component]
+        if qv is None or dv is None:
+            continue  # component unverifiable on one side
+        comparable += 1
+        if qv == dv:
+            matches += 1
+    if matches >= 2:
+        return True, ("exact" if comparable == 3 and matches == 3 else "partial")
+    return False, "mismatch"
+
+
+def _apply_echo_gate(parsed: dict, query_address: str, displayed_address: str) -> dict:
+    """Gate parsed DCAD fields behind R2 echo verification.
+
+    On mismatch the returned payload carries ONLY diagnostic status — no
+    property fields ever leak from a wrong property. On success the parsed
+    fields gain match_quality ('exact'|'partial').
+    """
+    ok, quality = _verify_echo(query_address, displayed_address)
+    if not ok:
+        return {
+            "status": "mismatch",
+            "error": (
+                f"DCAD detail page failed address echo-back verification "
+                f"(quality={quality}); property fields withheld"
+            ),
+            "displayed_address": displayed_address or None,
+        }
+    gated = dict(parsed)
+    gated["match_quality"] = quality
+    return gated
+
+
 async def _search_dcad_by_address(address: str) -> dict:
     """Search DCAD by property address using Playwright.
 
@@ -29,8 +134,10 @@ async def _search_dcad_by_address(address: str) -> dict:
     - ASP.NET form requires page.type() for proper keyboard events
     - Results page has a grid with a link to property detail
     - Detail page has property characteristics in a table
+
+    R2: results are gated by detail-page echo-back verification — see
+    _verify_echo / _apply_echo_gate.
     """
-    import re
     m = re.match(r'^(\d+)\s+(.+)', address.split(',')[0].strip())
     if not m:
         return {"error": "Cannot parse street number from address"}
@@ -84,7 +191,10 @@ async def _search_dcad_by_address(address: str) -> dict:
                     html = await page.content()
                     soup = BeautifulSoup(html, "html.parser")
 
-                result = _parse_dcad_detail(soup)
+                # R2: verify the page we landed on is actually the queried
+                # property before trusting any parsed characteristics.
+                displayed = _extract_displayed_address(soup)
+                result = _apply_echo_gate(_parse_dcad_detail(soup), address, displayed)
 
         except Exception as e:
             result = {"error": str(e)}
@@ -108,7 +218,6 @@ def _parse_dcad_detail(soup: BeautifulSoup) -> dict:
 
     # Extract fields using regex on the full text — more robust than table parsing
     # since DCAD uses complex multi-column table layouts
-    import re
 
     patterns = {
         "year_built": r'Year Built\s+(\d{4})',
@@ -171,5 +280,42 @@ if __name__ == "__main__":
     m2 = re.match(r'^(\d+)\s+(.+)', "Place of Sale: George Allen")
     assert m2 is None  # Not a real address
 
+    # Self-check (R2): token extraction
+    tokens = _address_tokens("15806 BREEDLOVE PLACE, ADDISON, TX 75001-6334")
+    assert tokens == {"street_number": "15806", "street_name_first": "BREEDLOVE",
+                      "zip5": "75001"}, tokens
+    assert _address_tokens("no leading number, TX")["street_number"] is None
+
+    # Self-check (R2): echo verification decisions
+    query = "15806 BREEDLOVE PLACE, ADDISON, TX 75001-6334"
+    ok, q = _verify_echo(query, "15806 Breedlove Place, Addison, TX 75001-6334")
+    assert ok and q == "exact", (ok, q)
+    # zip missing on detail page -> only 2 comparables, both match -> partial pass
+    ok, q = _verify_echo(query, "15806 BREEDLOVE PLACE")
+    assert ok and q == "partial", (ok, q)
+    # wrong zip -> 2 of 3 still match -> partial pass per policy
+    ok, q = _verify_echo(query, "15806 BREEDLOVE PLACE, DALLAS, TX 75201")
+    assert ok and q == "partial", (ok, q)
+    # wrong street number AND wrong zip -> fewer than 2 matches -> mismatch
+    ok, q = _verify_echo(query, "999 MAIN ST, DALLAS, TX 75201")
+    assert not ok and q == "mismatch", (ok, q)
+    # same number, different street name AND zip -> mismatch
+    ok, q = _verify_echo(query, "15806 MAIN ST, DALLAS, TX 75201")
+    assert not ok and q == "mismatch", (ok, q)
+    # blank display -> unverifiable -> fail loud
+    assert _verify_echo(query, "")[0] is False
+
+    # Self-check (R2): the gate strips property fields on mismatch
+    parsed_ok = {"status": "parsed", "year_built": "2004", "improvement_sqft": "2,100"}
+    gated = _apply_echo_gate(parsed_ok, query, "15806 Breedlove Pl, Addison, TX 75001")
+    assert gated["status"] == "parsed" and gated["year_built"] == "2004"
+    assert gated["match_quality"] in ("exact", "partial")
+    gated_bad = _apply_echo_gate(dict(parsed_ok), query, "42 OTHER ST, DENISON, TX 75020")
+    assert gated_bad["status"] == "mismatch"
+    for leak in ("year_built", "improvement_sqft", "beds", "baths",
+                 "cad_appraised_value", "match_quality"):
+        assert leak not in gated_bad, f"property field {leak} leaked past gate"
+
     print("dallas_cad.py: address parsing self-check passed")
+    print("dallas_cad.py: R2 echo-back verification self-check passed")
     print("dallas_cad.py: live DCAD search requires browser (Playwright) — skipping live test")

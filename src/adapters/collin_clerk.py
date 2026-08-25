@@ -12,14 +12,30 @@ from __future__ import annotations
 import asyncio
 import re
 from dataclasses import dataclass, field
+from datetime import date
 from bs4 import BeautifulSoup
-from playwright.async_api import async_playwright
+from playwright.async_api import async_playwright, Error as PlaywrightError
 
 from .base import SourceAdapter, SourceProvenance
 from ..cpr import LienRecord
+from ..dates import parse_date_any
 
 CLERK_URL = "https://collin.tx.publicsearch.us"
 UA = "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36"
+
+# Pagination (finding S2): the clerk results table is paginated; parse page 1
+# only and you silently miss liens that read as clean title at GATE-LEGAL-LIEN.
+MAX_SEARCH_PAGES = 20          # hard cap on pages fetched per search
+PAGE_LOAD_DELAY_MS = 1000      # settle time after clicking Next
+NEXT_PAGE_SELECTORS = [
+    'button[aria-label="Next"]',
+    'a[aria-label="Next"]',
+    'li.pagination-next a',
+    '.pagination-next > a',
+    '.pagination .page-item.next a',
+    '[title="Next"]',
+    'button:has-text("Next")',
+]
 
 # Document types that represent encumbrances — keyed by actual Kofile doc type names
 # Verified live Aug 20 2026 against Collin County Clerk search results
@@ -101,9 +117,38 @@ async def _search_clerk(party_name: str = "", legal_description: str = "",
                 await page.click('button:has-text("Search")')
                 await page.wait_for_timeout(8000)  # wait for results to load
 
-            # Parse results from the HTML table
+            # Parse the first results page
             html = await page.content()
             instruments = _parse_search_results(html)
+
+            # Best-effort pagination (finding S2): click a generic Next
+            # control, re-parse, and append rows until no Next is found, no
+            # new rows appear, or MAX_SEARCH_PAGES is hit. Never crashes the
+            # fetch — pagination problems degrade to page-1-only results.
+            try:
+                seen_doc_numbers = {i.doc_number for i in instruments}
+                for _ in range(MAX_SEARCH_PAGES - 1):
+                    next_clicked = False
+                    for selector in NEXT_PAGE_SELECTORS:
+                        try:
+                            await page.click(selector, timeout=2000)
+                            next_clicked = True
+                            break
+                        except PlaywrightError:
+                            continue
+                    if not next_clicked:
+                        break
+                    await page.wait_for_timeout(PAGE_LOAD_DELAY_MS)
+                    html = await page.content()
+                    page_rows = _parse_search_results(html)
+                    new_rows = [r for r in page_rows
+                                if r.doc_number and r.doc_number not in seen_doc_numbers]
+                    if not new_rows:
+                        break
+                    seen_doc_numbers.update(r.doc_number for r in new_rows)
+                    instruments.extend(new_rows)
+            except PlaywrightError as e:
+                print(f"Collin clerk: pagination stopped early (best effort): {e}")
 
         except Exception as e:
             print(f"Collin clerk search error: {e}")
@@ -174,24 +219,40 @@ def _parse_search_results(html: str) -> list[RecordedInstrument]:
 def build_lien_stack(instruments: list[RecordedInstrument]) -> list[LienRecord]:
     """Convert recorded instruments into a lien stack for the CPR.
 
-    Filters for encumbrance types, estimates priority by recording date,
-    and flags surviving-lien risk. Releases remove matching liens.
+    Filters for encumbrance types, orders priority by PARSED recording date
+    via src.dates.parse_date_any — never by lexicographic string comparison,
+    which mis-sorts US M/D/YYYY dates ("9/01/2019" vs "10/15/2020"; finding
+    S4). Instruments whose date cannot be parsed sort last. Release
+    instruments remove the most recent matching lien by comparing parsed
+    dates too; LienRecord.recording_date keeps the clerk's original display
+    string, annotated with "(released <date>)" when released.
     """
-    liens = []
-    # Sort by recorded date (earliest = highest priority)
-    sorted_insts = sorted(instruments, key=lambda i: i.recorded_date or "9999")
+    # Parse each recorded_date exactly once; unparseable -> None sorts last.
+    dated = [(inst, parse_date_any(inst.recorded_date)) for inst in instruments]
+    dated.sort(key=lambda pair: (pair[1] is None, pair[1] or date.max))
 
-    for i, inst in enumerate(sorted_insts):
+    liens: list[LienRecord] = []
+    parsed_dates: list = []  # parsed recording dates aligned with liens
+
+    for i, (inst, inst_date) in enumerate(dated):
         lien_type = ENCUMBRANCE_TYPES.get(inst.doc_type)
         if not lien_type:
             continue
 
         if lien_type == "release":
-            # Mark the most recent matching lien as released
-            # ponytail: simplified — real release matching requires book/vol/pg cross-ref
-            for lien in reversed(liens):
-                if lien.recording_date and inst.recorded_date > lien.recording_date:
-                    lien.recording_date = f"{lien.recording_date} (released {inst.recorded_date})"
+            if inst_date is None:
+                # A release without a parseable date cannot be matched to any
+                # lien — skip it loudly rather than guess.
+                print(f"Collin clerk: release {inst.doc_number} has unparseable "
+                      f"recorded_date {inst.recorded_date!r} — not matched")
+                continue
+            # Mark the most recent matching lien as released.
+            for j in range(len(liens) - 1, -1, -1):
+                lien_date = parsed_dates[j]
+                if lien_date is not None and inst_date > lien_date:
+                    liens[j].recording_date = (
+                        f"{liens[j].recording_date} (released {inst.recorded_date})"
+                    )
                     break
             continue
 
@@ -206,6 +267,7 @@ def build_lien_stack(instruments: list[RecordedInstrument]) -> list[LienRecord]:
             survives_foreclosure=survives_fc,
             survives_tax_sale=survives_ts,
         ))
+        parsed_dates.append(inst_date)
 
     return liens
 
@@ -251,6 +313,49 @@ if __name__ == "__main__":
     assert liens[1].lien_type == "mortgage"
     assert liens[2].lien_type == "irs_federal"
     assert liens[2].survives_tax_sale == True  # IRS survives tax sale
+
+    # Self-check (S4): US M/D/YYYY dates must sort by PARSED date.
+    # Lexicographic order would put "9/01/2019" after "10/15/2020".
+    us_dates = [
+        RecordedInstrument("D2020", "DEED OF TRUST", "10/15/2020"),
+        RecordedInstrument("D2019", "LIEN", "9/01/2019"),
+    ]
+    liens_us = build_lien_stack(us_dates)
+    assert [l.lien_type for l in liens_us] == ["lien", "mortgage"], \
+        f"S4 regression: {[(l.lien_type, l.recording_date) for l in liens_us]}"
+    assert liens_us[0].recording_date == "9/01/2019"
+    assert liens_us[0].priority < liens_us[1].priority
+    print("collin_clerk.py: PASS — 9/01/2019 sorts BEFORE 10/15/2020 (parsed-date ordering)")
+
+    # Self-check (S4): release matching compares parsed dates too
+    rel_fixtures = [
+        RecordedInstrument("R1", "LIEN", "12/01/2019"),
+        RecordedInstrument("R2", "RELEASE", "3/01/2020"),
+        RecordedInstrument("R3", "LIEN", "5/15/2020"),
+    ]
+    rel_liens = build_lien_stack(rel_fixtures)
+    assert len(rel_liens) == 2
+    released_one = next(l for l in rel_liens if l.recording_date.startswith("12/01/2019"))
+    assert "(released 3/01/2020)" in released_one.recording_date, \
+        f"Release not matched by parsed date: {released_one.recording_date}"
+    survivor = next(l for l in rel_liens if l.recording_date.startswith("5/15/2020"))
+    assert "(released" not in survivor.recording_date
+    # A release that predates every lien must match nothing
+    pre_rel = build_lien_stack([
+        RecordedInstrument("P1", "LIEN", "6/01/2019"),
+        RecordedInstrument("P2", "RELEASE", "1/01/2019"),
+    ])
+    assert all("(released" not in l.recording_date for l in pre_rel)
+    print("collin_clerk.py: PASS — release matched via parsed dates; original display string kept")
+
+    # Self-check (S4): instruments with unparseable dates sort last, loudly
+    unk_first = build_lien_stack([
+        RecordedInstrument("U1", "LIEN", "Unknown"),
+        RecordedInstrument("U2", "DEED OF TRUST", "7/04/2018"),
+    ])
+    assert unk_first[0].recording_date == "7/04/2018"
+    assert unk_first[-1].recording_date == "Unknown"
+    print("collin_clerk.py: PASS — unparseable recorded dates sort last")
 
     print("collin_clerk.py: all self-checks passed")
     print("collin_clerk.py: live search requires Playwright browser — skipping live test")
