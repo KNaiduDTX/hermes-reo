@@ -187,13 +187,18 @@ def parse_notice_image(base64_image: str) -> NoticeOCRData:
     try:
         import pytesseract
         from PIL import Image
+        # Decompression-bomb guard (audit P4): refuse absurdly large scans
+        # instead of letting a hostile image exhaust memory.
+        Image.MAX_IMAGE_PIXELS = 30_000_000  # ~30 MP
     except ImportError:
         return NoticeOCRData(status="no_ocr", ocr_engine="none")
 
     try:
         image_data = base64.b64decode(b64_str)
-        image = Image.open(io.BytesIO(image_data))
-        text = pytesseract.image_to_string(image)
+        with Image.open(io.BytesIO(image_data)) as image:
+            # timeout (audit P4): a pathological scan can no longer hang the
+            # pipeline — pytesseract raises RuntimeError on expiry.
+            text = pytesseract.image_to_string(image, timeout=30)
     except Exception:
         return NoticeOCRData(status="parse_fail", ocr_engine="tesseract")
 

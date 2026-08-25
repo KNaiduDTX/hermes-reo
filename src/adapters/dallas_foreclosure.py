@@ -164,9 +164,12 @@ def download_pdf(url: str, local_dir: str) -> str | None:
     req = urllib.request.Request(url, headers={"User-Agent": UA})
     try:
         time.sleep(1.0)  # rate limit
-        with urllib.request.urlopen(req, timeout=15) as resp, open(local_path, "wb") as f:
-            f.write(resp.read())
-        return local_path
+        with urllib.request.urlopen(req, timeout=15) as resp:
+            payload = resp.read()
+        # Atomic write (audit D2): a crash mid-download previously left a
+        # truncated PDF on disk that later parsing would treat as real.
+        from ..io_utils import write_bytes
+        return write_bytes(local_path, payload)
     except ValueError:
         raise
     except Exception:

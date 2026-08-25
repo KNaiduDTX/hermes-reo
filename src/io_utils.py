@@ -45,6 +45,26 @@ def write_text(path: str, text: str) -> str:
     return _atomic_replace(path, lambda f: f.write(text))
 
 
+def write_bytes(path: str, data: bytes) -> str:
+    """Atomically write binary *data* (e.g. downloaded PDFs) to *path*."""
+    directory = os.path.dirname(os.path.abspath(path)) or "."
+    os.makedirs(directory, exist_ok=True)
+    fd, tmp_path = tempfile.mkstemp(dir=directory, suffix=".tmp", prefix=".atomic-")
+    try:
+        with os.fdopen(fd, "wb") as f:
+            f.write(data)
+            f.flush()
+            os.fsync(f.fileno())
+        os.replace(tmp_path, path)
+    except BaseException:
+        try:
+            os.unlink(tmp_path)
+        except OSError:
+            pass
+        raise
+    return path
+
+
 # Backwards-friendly aliases used by call sites.
 atomic_write_json = write_json
 atomic_write_text = write_text
