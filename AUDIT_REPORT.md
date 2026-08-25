@@ -218,3 +218,4 @@ The architecture is genuinely good — provenance-chained records, gate-first de
 | OCR timeout worker / binary-atomic PDF writes / lockfile cadence | ⏳ still open (small; next wave) |
 
 **Gate status:** lint ✓ · 55 unit tests ✓ · self-checks ✓ · offline fixture ✓ · workbook ✓ · recalc+8 ✓
+| OCR timeout worker / binary-atomic PDF writes | ✅ DONE — pytesseract timeout=30 + PIL bomb guard; write_bytes atomic binary writer for downloads |
