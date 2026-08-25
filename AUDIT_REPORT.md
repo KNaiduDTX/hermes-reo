@@ -206,3 +206,15 @@ The architecture is genuinely good — provenance-chained records, gate-first de
 
 ## Gate status at close
 `make verify` = lint ✓ · 43 unit ✓ · 22 module self-checks ✓ · offline fixture ✓ · workbook build ✓ — then `make recalc`: LibreOffice round-trip + 8 recalc assertions ✓ (97 named ranges survive).
+
+## Wave 3 completion (same day) — deferred items cleared
+| Deferred item | Status |
+|---|---|
+| Shared constants module (`src/policy.py`) + cross-file divergence (8% vs 7.5% closing) | ✅ DONE — policy wired through pricing/underwriting/negotiation/valuation/pipeline/workbook seeds; parity guard added |
+| build_workbook monolith → per-tab builders + import guard | ✅ DONE — byte-stable output verified via exhaustive openpyxl diff vs baseline |
+| bulk-dcad flat-schema mismatch (silent no-op) | ✅ DONE — `enrich_from_flat_record` + merge-on-write + atomic write-back |
+| Dataset coordinate backfill tooling | ✅ DONE — opt-in `--geocode-backfill [--dry-run]`, cap 25/run, 296 geocodable identified |
+| Logging framework replacing library prints | ✅ DONE — zero prints above `__main__` guards in src/**; runners configure basicConfig |
+| OCR timeout worker / binary-atomic PDF writes / lockfile cadence | ⏳ still open (small; next wave) |
+
+**Gate status:** lint ✓ · 55 unit tests ✓ · self-checks ✓ · offline fixture ✓ · workbook ✓ · recalc+8 ✓
