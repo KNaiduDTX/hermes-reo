@@ -10,11 +10,13 @@
 #   python3 pipeline.py --bulk-dcad                 # DCAD bulk cross-reference
 #   python3 pipeline.py --geocode-backfill          # OPT-IN Census geocode backfill (network)
 #   python3 pipeline.py --geocode-backfill --dry-run  # plan only — zero network
+#   python3 pipeline.py --geocode-backfill --retry-failed  # override failure ledger
 #
 # Live scraping is strictly opt-in via --live. With no data mode selected the
 # runner prints a hint and exits 0 without touching the network.
 from __future__ import annotations
 import argparse
+import hashlib
 import re
 import json
 import os
@@ -22,11 +24,13 @@ import subprocess
 import sys
 import time
 from concurrent.futures import ThreadPoolExecutor
+from datetime import datetime, timedelta, timezone
 import logging
 
 # Ensure src is importable
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
+from src.addr import is_plausible_street_address, to_census_one_line  # shared outbound-query normalizer
 from src.io_utils import write_json, write_text  # atomic crash-safe writers (shared contract)
 from src import policy  # B4: single source of truth for decision-policy constants
 
@@ -671,6 +675,122 @@ def _run_bulk_dcad():
 
 
 GEOCODE_BACKFILL_CAP = 25  # hard cap: addresses geocoded per invocation
+GEOCODE_LEDGER_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                                   "data", "geocode_failures.json")
+GEOCODE_MAX_ATTEMPTS = 3      # skip an address after this many failures...
+GEOCODE_FAILURE_TTL_DAYS = 7  # ...until its newest failure goes stale
+
+
+def _utc_now() -> datetime:
+    """Timezone-aware clock; injectable in tests (never naive utcnow)."""
+    return datetime.now(timezone.utc)
+
+
+def _parse_ledger_ts(value) -> datetime | None:
+    """Parse a ledger ISO timestamp; naive values are read as UTC."""
+    try:
+        ts = datetime.fromisoformat(str(value))
+    except (TypeError, ValueError):
+        return None
+    if ts.tzinfo is None:
+        ts = ts.replace(tzinfo=timezone.utc)
+    return ts
+
+
+def geocode_failure_key(address: str) -> str:
+    """Negative-cache key: sha1[:16] of the normalized census query.
+
+    Falls back to hashing the raw string when normalization rejects it, so
+    implausible addresses still get a stable identity.
+    """
+    query = to_census_one_line(address) or (address or "")
+    return hashlib.sha1(query.encode("utf-8")).hexdigest()[:16]
+
+
+def load_geocode_failures(path: str = GEOCODE_LEDGER_PATH) -> dict:
+    """Load the failure ledger tolerantly: missing/corrupt -> fresh {}."""
+    try:
+        with open(path) as f:
+            raw = json.load(f)
+    except FileNotFoundError:
+        return {}
+    except (OSError, ValueError):
+        print(f"  [geocode-ledger] unreadable at {path} — starting fresh")
+        return {}
+    if not isinstance(raw, dict):
+        print(f"  [geocode-ledger] unexpected shape at {path} — starting fresh")
+        return {}
+    ledger: dict[str, dict] = {}
+    for key, entry in raw.items():
+        if not isinstance(entry, dict):
+            continue  # tolerate junk entries instead of failing the run
+        attempts = entry.get("attempts")
+        ledger[str(key)] = {
+            "attempts": attempts if isinstance(attempts, int) else 0,
+            "last_status": str(entry.get("last_status", "")),
+            "last_at": str(entry.get("last_at", "")),
+        }
+    return ledger
+
+
+def record_geocode_failure(ledger: dict, address: str, status: str,
+                           now_fn=_utc_now) -> None:
+    """Bump the failure tally for *address* in place (mutates *ledger*)."""
+    entry = ledger.setdefault(geocode_failure_key(address), {"attempts": 0})
+    entry["attempts"] = int(entry.get("attempts", 0)) + 1
+    entry["last_status"] = status
+    entry["last_at"] = now_fn().isoformat()
+
+
+def clear_geocode_failure(ledger: dict, address: str) -> None:
+    """A successful geocode forgives: drop the address from the ledger."""
+    ledger.pop(geocode_failure_key(address), None)
+
+
+def should_skip_geocode(entry: dict | None, retry_failed: bool = False,
+                        now_fn=_utc_now) -> bool:
+    """True when a previously-failed address must sit this invocation out.
+
+    Skip iff attempts >= GEOCODE_MAX_ATTEMPTS AND the newest failure is
+    younger than GEOCODE_FAILURE_TTL_DAYS. --retry-failed overrides; a stale
+    or unreadable last_at expires the entry (address becomes retryable).
+    """
+    if retry_failed or not entry:
+        return False
+    attempts = entry.get("attempts") or 0
+    if attempts < GEOCODE_MAX_ATTEMPTS:
+        return False
+    last_at = _parse_ledger_ts(entry.get("last_at"))
+    if last_at is None:
+        return False
+    age = now_fn() - last_at
+    return timedelta(0) <= age < timedelta(days=GEOCODE_FAILURE_TTL_DAYS)
+
+
+def select_geocode_targets(missing_records: list[dict], ledger: dict,
+                           cap: int = GEOCODE_BACKFILL_CAP,
+                           retry_failed: bool = False,
+                           now_fn=_utc_now) -> tuple[list[dict], dict]:
+    """Partition missing-coordinate records into this run's geocode targets.
+
+    Implausible addresses are never queried; previously-failed addresses
+    inside the TTL window are skipped unless --retry-failed. Skip counts
+    cover ALL candidates (not just those under *cap*); only the first *cap*
+    survivors are returned.
+    """
+    stats = {"skipped_previously_failed": 0, "skipped_implausible": 0}
+    eligible: list[dict] = []
+    for rec in missing_records:
+        address = rec.get("address", "")
+        if not is_plausible_street_address(address):
+            stats["skipped_implausible"] += 1
+            continue
+        if should_skip_geocode(ledger.get(geocode_failure_key(address)),
+                               retry_failed=retry_failed, now_fn=now_fn):
+            stats["skipped_previously_failed"] += 1
+            continue
+        eligible.append(rec)
+    return eligible[:cap], stats
 
 
 def _record_missing_coords(record: dict) -> bool:
@@ -689,7 +809,8 @@ def _record_missing_coords(record: dict) -> bool:
 
 
 def _run_geocode_backfill(dry_run: bool = False,
-                          cap: int = GEOCODE_BACKFILL_CAP):
+                          cap: int = GEOCODE_BACKFILL_CAP,
+                          retry_failed: bool = False):
     """B3: backfill missing coordinates in current_deals.json via Census.
 
     Strictly OPT-IN (--geocode-backfill): performs network calls against
@@ -699,6 +820,13 @@ def _run_geocode_backfill(dry_run: bool = False,
     write-back (only falsy slots filled, unknown keys preserved).
     --dry-run prints what WOULD be geocoded and performs ZERO network calls;
     without --geocode-backfill this code path is never reached at all.
+
+    Negative caching: outbound queries go through src.addr.to_census_one_line;
+    implausible addresses are never queried. Census failures (no-match /
+    timeout / error) are tallied in data/geocode_failures.json (atomic write
+    after each batch); addresses with >= GEOCODE_MAX_ATTEMPTS failures within
+    GEOCODE_FAILURE_TTL_DAYS are skipped unless *retry_failed* (--retry-failed).
+    Success removes the address from the ledger.
     """
     print(f"\n{'=' * 70}")
     print(f"  HERMES-REO PIPELINE — CENSUS GEOCODE BACKFILL"
@@ -720,30 +848,59 @@ def _run_geocode_backfill(dry_run: bool = False,
         if rec.get("address") and rec.get("address") != "Unknown"
         and _record_missing_coords(rec)
     ]
-    targets = missing[:cap]
+    ledger = load_geocode_failures()
+    targets, skip_stats = select_geocode_targets(missing, ledger, cap=cap,
+                                                 retry_failed=retry_failed)
 
     print(f"  Records in dataset: {len(records)}")
     print(f"  Missing coordinates (geocodable address): {len(missing)}")
+    print(f"  Skipped, previously failed <{GEOCODE_FAILURE_TTL_DAYS}d: "
+          f"{skip_stats['skipped_previously_failed']}"
+          f"{' (--retry-failed: retrying anyway)' if retry_failed else ''}")
+    print(f"  Skipped, implausible address (never queried): "
+          f"{skip_stats['skipped_implausible']}")
     print(f"  Selected this run (hard cap {cap}): {len(targets)}")
 
     if dry_run:
         for rec in targets:
             print(f"    [dry-run] would geocode: {rec['address']}")
         print(f"  DRY RUN complete — {len(targets)} of {len(missing)} candidate(s) "
-              f"would be geocoded; ZERO network performed, nothing written.")
+              f"would be geocoded "
+              f"({skip_stats['skipped_previously_failed']} previously-failed "
+              f"skipped); ZERO network performed, nothing written.")
         return
 
     if not targets:
-        print("  Nothing to geocode — every record already has coordinates.")
+        if missing:
+            print(f"  Nothing to geocode — {len(missing)} candidate(s) remain but all are "
+                  f"ledger-skipped ({skip_stats['skipped_previously_failed']}) or implausible "
+                  f"({skip_stats['skipped_implausible']}). Use --retry-failed to force.")
+        else:
+            print("  Nothing to geocode — every record already has coordinates.")
         return
 
     from src.adapters.census import geocode_address, GEOCODE_RATE_LIMIT_S
 
     succeeded = failed = 0
     failure_reasons: dict[str, int] = {}
+    ledger_dirty = False
+    calls_made = 0
     for n, rec in enumerate(targets, 1):
         address = rec["address"]
-        result = geocode_address(address)
+        query = to_census_one_line(address)
+        if not query:
+            # Defensive: selection already filtered implausible addresses.
+            failed += 1
+            failure_reasons["Invalid Address"] = \
+                failure_reasons.get("Invalid Address", 0) + 1
+            record_geocode_failure(ledger, address, "Invalid Address")
+            ledger_dirty = True
+            print(f"  [{n}/{len(targets)}] ✗ {address} → Invalid Address")
+            continue
+        if calls_made:
+            time.sleep(GEOCODE_RATE_LIMIT_S)  # adapter rate limit between calls
+        result = geocode_address(query)
+        calls_made += 1
         status = str(result.get("status", "UnknownStatus"))
         if result.get("status") == "Success" \
                 and result.get("latitude") and result.get("longitude"):
@@ -754,15 +911,22 @@ def _run_geocode_backfill(dry_run: bool = False,
                 rec["census_tract"] = result["census_tract"]
             if not rec.get("county_fips") and result.get("county_fips"):
                 rec["county_fips"] = result["county_fips"]
+            clear_geocode_failure(ledger, address)  # success forgives
+            ledger_dirty = True
             succeeded += 1
             print(f"  [{n}/{len(targets)}] ✓ {address} → "
                   f"({result['latitude']:.5f}, {result['longitude']:.5f})")
         else:
             failed += 1
             failure_reasons[status] = failure_reasons.get(status, 0) + 1
+            record_geocode_failure(ledger, address, status)
+            ledger_dirty = True
             print(f"  [{n}/{len(targets)}] ✗ {address} → {status}")
-        if n < len(targets):
-            time.sleep(GEOCODE_RATE_LIMIT_S)  # adapter rate limit between calls
+
+    if ledger_dirty:
+        write_json(GEOCODE_LEDGER_PATH, ledger)  # negative cache (atomic)
+        print(f"  Failure ledger: {len(ledger)} entrie(s) → "
+              f"{GEOCODE_LEDGER_PATH} (atomic)")
 
     if succeeded:
         write_json(data_path, records)  # atomic write-back (B2 pattern)
@@ -797,6 +961,9 @@ def main():
                              "missing lat/lng (rate-limited, hard cap 25 per invocation)")
     parser.add_argument("--dry-run", action="store_true",
                         help="With --geocode-backfill: print the plan without any network call")
+    parser.add_argument("--retry-failed", action="store_true",
+                        help="With --geocode-backfill: retry addresses even when the failure "
+                             "ledger would skip them (>=3 failures within 7 days)")
     parser.add_argument("--allow-gate-fail-demo", action="store_true",
                         help="Continue past GATE-LEGAL-LIEN fail/hitl (demo only — loud banner printed)")
     args = parser.parse_args()
@@ -824,7 +991,8 @@ def main():
 
     if args.geocode_backfill:
         # B3: unreachable unless the flag is passed — no network otherwise.
-        _run_geocode_backfill(dry_run=args.dry_run)
+        _run_geocode_backfill(dry_run=args.dry_run,
+                              retry_failed=args.retry_failed)
     elif args.bulk_dcad:
         _run_bulk_dcad()
     elif args.fixture:
