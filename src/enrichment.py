@@ -313,6 +313,157 @@ def enrich_from_raw_record(record: dict) -> CPR:
     return cpr
 
 
+def normalize_deal_identity(county, address) -> tuple[str, str]:
+    """Canonical merge key for current_deals.json rows: (county.lower(),
+    upper-collapsed address). Shared by find_deals.py's merge-on-write and
+    pipeline.py's DCAD write-back so both match records identically.
+    """
+    return (
+        str(county or "").strip().lower(),
+        " ".join(str(address or "").upper().split()),
+    )
+
+
+def _clean_flat_value(val):
+    """Normalize a flat current_deals.json value: None for missing data.
+
+    Flat rows use Python Nones, empty strings and the literal "Unknown" as
+    placeholders — none of those may reach a ProvenanceField.
+    """
+    if val is None:
+        return None
+    if isinstance(val, str):
+        stripped = val.strip()
+        if not stripped or stripped.lower() in ("unknown", "n/a", "none"):
+            return None
+        return stripped
+    return val
+
+
+def enrich_from_flat_record(record: dict) -> CPR:
+    """Enrich a CPR from a FLAT current_deals.json record (AUDIT D1 fix).
+
+    current_deals.json rows are flat dicts written by find_deals.analyze_deal
+    (address / city / county / parcel_id / sqft / beds / ...). The legacy
+    enrich_from_raw_record expects the OLD nested lucid-noether schema
+    (details/entry_id/property_address), so routing flat rows through it
+    resolved every field to "Unknown" and --bulk-dcad silently no-op'd.
+
+    Mapping: parcel_id → identity, county lowercased, address → situs,
+    sqft/beds/baths/year_built/stories/pool set only when truthy and not a
+    placeholder, cad_value → cad_appraised_value provenance field, city,
+    mortgage_debt → estimated mortgage lien via the same pattern as the OCR
+    path in _enrich_common (ONLY when a positive number), lat/lng when both
+    nonzero. Confidence is 0.70 for the {county}_source fields.
+
+    None-safety contract: fields the record lacks are never set, so the
+    attribute stays None — callers keep using ``cpr.f.value if cpr.f else ...``.
+    enrich_from_raw_record is untouched and still owns the nested schema.
+    """
+    county = str(record.get("county") or "unknown").lower()
+    source = f"{county}_source"
+    confidence = 0.70  # flat-row provenance strength
+
+    cpr = CPR(
+        parcel_id=str(record.get("parcel_id") or ""),
+        county=county,
+        situs_address=_clean_flat_value(record.get("address")) or "Unknown",
+        channel="foreclosure_notice",
+    )
+
+    # Characteristics — only set when the row actually carries usable values.
+    sqft = _parse_int(_clean_flat_value(record.get("sqft")))
+    if sqft:
+        cpr.set_field("improvement_sqft", sqft, source, confidence)
+    beds = _parse_int(_clean_flat_value(record.get("beds")))
+    if beds:
+        cpr.set_field("beds", beds, source, confidence)
+    baths = _parse_float(_clean_flat_value(record.get("baths")))
+    if baths:
+        cpr.set_field("baths", baths, source, confidence)
+    year_built = _parse_int(_clean_flat_value(record.get("year_built")))
+    if year_built:
+        cpr.set_field("year_built", year_built, source, confidence)
+    stories = _parse_int(_clean_flat_value(record.get("stories")))
+    if stories:
+        cpr.set_field("stories", stories, source, confidence)
+    pool = _clean_flat_value(record.get("pool"))
+    if pool:
+        cpr.set_field("pool", _parse_bool(pool), source, confidence)
+
+    # Owner / property context
+    owner = _clean_flat_value(record.get("owner"))
+    if owner:
+        cpr.set_field("owner_name", owner, source, confidence)
+    ptype = _clean_flat_value(record.get("property_type"))
+    if ptype:
+        cpr.set_field("property_type", ptype, source, confidence)
+
+    # CAD valuations — baseline provenance fields (not market ARV)
+    cad_value = _parse_float(_clean_flat_value(record.get("cad_value")))
+    if cad_value:
+        cpr.set_field("cad_appraised_value", cad_value, source, confidence)
+    cad_2025 = _parse_float(_clean_flat_value(record.get("cad_value_2025")))
+    if cad_2025:
+        cpr.set_field("cad_appraised_value_2025", cad_2025, source, confidence)
+
+    # City
+    city = _clean_flat_value(record.get("city"))
+    if city:
+        cpr.set_field("city", city, source, confidence)
+
+    # Estimated lien from the flat mortgage_debt — SAME pattern as the OCR
+    # path in _enrich_common: only when it parses to a positive number, and
+    # never fabricated otherwise. The lender rides along when present.
+    debt = record.get("mortgage_debt")
+    if isinstance(debt, (int, float)) and not isinstance(debt, bool) and debt > 0:
+        lender = _clean_flat_value(record.get("lender")) or "Unknown"
+        cpr.set_field("foreclosing_lender", lender, source, confidence)
+        cpr.add_lien(LienRecord(
+            lien_type="mortgage",
+            amount=float(debt),
+            lender=lender,
+            priority=1,
+            survives_foreclosure=False,
+            survives_tax_sale=False,
+        ), source)
+
+    # Geocoded coordinates — only when both parse and are nonzero.
+    lat_raw, lng_raw = record.get("latitude"), record.get("longitude")
+    try:
+        lat = float(lat_raw) if lat_raw not in (None, "") else None
+        lng = float(lng_raw) if lng_raw not in (None, "") else None
+    except (TypeError, ValueError):
+        lat = lng = None
+    if lat and lng and lat != 0 and lng != 0:
+        cpr.gis_lat = lat
+        cpr.gis_lng = lng
+        cpr.set_field("gis_lat", lat, source, 0.90)
+        cpr.set_field("gis_lng", lng, source, 0.90)
+
+    # Census context carried by earlier census/geocode passes.
+    tract = _clean_flat_value(record.get("census_tract"))
+    if tract:
+        cpr.set_field("census_tract", str(tract), source, 0.95)
+    fips = _clean_flat_value(record.get("county_fips"))
+    if fips:
+        cpr.set_field("county_fips", str(fips), source, 0.95)
+
+    # Trustee-sale date (already adjudicated upstream; Collin owner-deed dates
+    # never surface here because analyze_deal stores X5-corrected values).
+    sale_date = _clean_flat_value(record.get("sale_date"))
+    if sale_date:
+        cpr.set_field("sale_date", sale_date, source, confidence * 0.8)
+
+    # Distress state + DCAD flag (mirrors enrich_from_dallas_details).
+    cpr.deal_type = "DT-AUCTION"
+    if county == "dallas" and not sqft and cpr.situs_address != "Unknown":
+        cpr.set_field("dcad_cross_ref_needed", True, "enrichment", 1.0)
+
+    cpr.move_column(CPRColumn.ENRICHED)
+    return cpr
+
+
 def enrich_lead(lead: NormalizedLead) -> CPR:
     """Route enrichment based on county/source."""
     if lead.county == "collin" and "details" in lead.raw_data:
@@ -492,6 +643,73 @@ if __name__ == "__main__":
     assert cpr2.sale_date.value == "Tuesday, the 3rd day of March, 2026"
     assert not hasattr(cpr2, "owner_deed_date")  # never fabricated for Dallas
 
+    # ---- D1 regression: FLAT current_deals.json rows -----------------------
+    # Complete Dallas row — every field must land on the CPR.
+    flat_complete = {
+        "address": "15806 BREEDLOVE PLACE, ADDISON, TX 75001-6334",
+        "city": "Addison", "county": "dallas",
+        "parcel_id": "DAL_March_Addison_1",
+        "owner": "KERRY P. GRAY SEPARATED",
+        "property_type": "Residential Single Family (A1)",
+        "sqft": 1826, "beds": 3, "baths": 2.0, "year_built": 1983,
+        "stories": 1, "pool": False,
+        "cad_value": 387000.0, "cad_value_2025": 371520.0,
+        "mortgage_debt": 309600.0, "lender": "CTX MORTGAGE COMPANY",
+        "sale_date": "Tuesday, the 3rd day of March, 2026",
+        "latitude": 32.964465474806, "longitude": -96.825153337622,
+        "census_tract": "013628", "county_fips": "113",
+    }
+    fc = enrich_from_flat_record(flat_complete)
+    assert fc.parcel_id == "DAL_March_Addison_1"
+    assert fc.county == "dallas" and fc.situs_address.startswith("15806 BREEDLOVE")
+    assert fc.improvement_sqft.value == 1826
+    assert fc.beds.value == 3 and fc.baths.value == 2.0
+    assert fc.year_built.value == 1983 and fc.stories.value == 1
+    assert fc.cad_appraised_value.value == 387000.0
+    assert fc.cad_appraised_value_2025.value == 371520.0
+    assert fc.city.value == "Addison"
+    assert fc.owner_name.value == "KERRY P. GRAY SEPARATED"
+    assert fc.foreclosing_lender.value == "CTX MORTGAGE COMPANY"
+    assert len(fc.liens) == 1 and fc.liens[0].amount == 309600.0
+    assert fc.liens[0].lender == "CTX MORTGAGE COMPANY"
+    assert fc.gis_lat.value == 32.964465474806
+    assert fc.gis_lng.value == -96.825153337622
+    assert fc.census_tract.value == "013628" and fc.county_fips.value == "113"
+    assert fc.sale_date.value == "Tuesday, the 3rd day of March, 2026"
+    assert fc.improvement_sqft.source == "dallas_source"
+    assert fc.improvement_sqft.confidence == 0.70  # dallas source-field confidence
+    assert fc.column == CPRColumn.ENRICHED
+    assert not hasattr(fc, "dcad_cross_ref_needed")  # sqft present → no flag
+
+    # Sparse row with placeholder junk — must stay None-safe (no fabrication).
+    flat_sparse = {
+        "address": "123 Nowhere Ave", "county": "Dallas",  # county case-insensitive
+        "city": "", "sqft": None, "beds": "Unknown", "baths": "",
+        "year_built": None, "cad_value": None, "cad_value_2025": "Unknown",
+        "mortgage_debt": None, "lender": None,
+        "latitude": 0, "longitude": None, "parcel_id": "",
+    }
+    fs = enrich_from_flat_record(flat_sparse)
+    assert fs.county == "dallas" and fs.parcel_id == ""
+    assert fs.situs_address == "123 Nowhere Ave"
+    for unset in ("improvement_sqft", "beds", "baths", "year_built", "stories",
+                  "city", "owner_name", "cad_appraised_value",
+                  "cad_appraised_value_2025", "sale_date"):
+        # Undeclared CPR extras (stories/city/...) don't even exist until set:
+        # None-safety means absent OR None, never a fabricated placeholder.
+        assert getattr(fs, unset, None) is None, f"{unset} should be unset (None-safe)"
+    assert len(fs.liens) == 0, "must never fabricate a lien without positive debt"
+    assert fs.gis_lat is None and fs.gis_lng is None  # zero lat/lng never set
+    assert fs.dcad_cross_ref_needed.value is True  # Dallas + no sqft → flag
+    assert fs.column == CPRColumn.ENRICHED
+
+    # normalize_deal_identity: shared merge key (find_deals merge-on-write /
+    # pipeline DCAD write-back must agree on identity).
+    assert normalize_deal_identity("Dallas", "15806  Breedlove   Place") == \
+        normalize_deal_identity("dallas", "15806 BREEDLOVE PLACE")
+
     print(f"enrichment.py: Collin — {len(cpr.ledger)} ledger entries (was ~13, now captures all fields)")
     print(f"enrichment.py: Dallas — {len(cpr2.ledger)} ledger entries")
+    print(f"enrichment.py: flat rows — complete={len(fc.ledger)} entries, "
+          f"sparse None-safe (no fabricated fields/lien), D1 mapping OK")
     print("enrichment.py: all self-checks passed")

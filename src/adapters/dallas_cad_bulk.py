@@ -32,6 +32,8 @@ from ..io_utils import write_json
 from .dallas_cad import DallasCADAdapter, _search_dcad_by_address, _parse_dcad_detail
 from .base import SourceProvenance
 
+_log = logging.getLogger(__name__)
+
 logger = logging.getLogger(__name__)
 
 CACHE_PATH = os.path.join(os.path.dirname(__file__), "..", "..", "data", "dcad_cache.json")
@@ -206,7 +208,7 @@ def cross_reference_dcad_bulk(cprs: list, batch_limit: int = 50) -> int:
     if not addresses:
         return 0
 
-    print(f"DCAD bulk: {len(addresses)} addresses to cross-reference (limit: {batch_limit})")
+    _log.info(f"DCAD bulk: {len(addresses)} addresses to cross-reference (limit: {batch_limit})")
     cache = batch_cross_reference(addresses, batch_limit)
 
     # Update CPRs with DCAD results — only the addresses actually processed

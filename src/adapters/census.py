@@ -24,6 +24,10 @@ CENSUS_ADDR_URL = "https://geocoding.geo.census.gov/geocoder/geographies/oneline
 MAX_RETRIES = 3
 BACKOFF_BASE = 1.0
 
+# Adapter rate limit: minimum seconds between Census API calls. Single source
+# of truth for every caller (enrich_batch below, pipeline --geocode-backfill).
+GEOCODE_RATE_LIMIT_S = 0.5
+
 # N2: the complete set of retryable exception types. TimeoutException is a
 # TransportError subclass in httpx; both are listed for explicitness.
 RETRYABLE_EXCEPTIONS = (httpx.TimeoutException, httpx.TransportError)
@@ -190,7 +194,7 @@ def enrich_batch(records: list[dict], batch_limit: int = 30) -> list[dict]:
         details["census_demographics"] = geo
         if geo.get("status") == "Success":
             changes += 1
-        time.sleep(0.5)
+        time.sleep(GEOCODE_RATE_LIMIT_S)
 
     return records
 
@@ -210,6 +214,10 @@ if __name__ == "__main__":
     assert _should_retry(None, None) is False
     # exception wins over status when both are supplied
     assert _should_retry(httpx.ReadTimeout("t"), 400) is True
+
+    # B3: rate limit is a positive constant shared with pipeline backfill
+    assert GEOCODE_RATE_LIMIT_S > 0
+    assert enrich_batch.__doc__  # batch entry point documented
 
     import inspect
     src = inspect.getsource(_request_json)

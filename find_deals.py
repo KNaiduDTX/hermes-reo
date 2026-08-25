@@ -11,7 +11,7 @@ from datetime import datetime
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
-from src.enrichment import enrich_from_raw_record, enrich_lead
+from src.enrichment import enrich_from_raw_record, enrich_lead, normalize_deal_identity
 from src.adapters.collin_foreclosure import CollinForeclosureAdapter
 from src.adapters.geojson_export import cpr_to_geojson
 from src.underwriting import mao
@@ -24,6 +24,77 @@ from src.io_utils import write_json, write_text  # atomic crash-safe writers (sh
 # F1: dataset location is overridable via env; default keeps the lucid-noether path.
 DEFAULT_LUCID_DATA = "/Users/knaidu/Documents/antigravity/lucid-noether/foreclosure_report.json"
 LUCID_DATA = os.environ.get("HERMES_LUCID_DATA") or DEFAULT_LUCID_DATA
+
+# --- B2: MERGE-ON-WRITE ------------------------------------------------------
+# This script regenerates current_deals.json FROM SCRATCH on every run, which
+# used to destroy any enrichment previously written back into the dataset by
+# `pipeline.py --bulk-dcad` or `--geocode-backfill` (AUDIT D1, second half).
+# Before writing, the EXISTING dataset (if any) is loaded and keyed by
+# normalize_deal_identity() — (county.lower(), upper-collapsed address) — and
+# each fresh record inherits the prior value for the enrichment fields below
+# whenever the fresh scrape left that field empty/"Unknown"/0. Fresh non-empty
+# values always win (a genuine re-scrape still refreshes data); only gaps are
+# filled from the previous generation.
+ENRICHMENT_CARRY_FORWARD_FIELDS = (
+    "sqft", "beds", "baths", "year_built", "stories", "pool",
+    "cad_value", "cad_value_2025", "census_tract", "county_fips",
+    "latitude", "longitude",
+)
+
+
+def _enrichment_field_is_empty(value) -> bool:
+    """True when a freshly scraped value is unusable as enrichment data."""
+    if value is None:
+        return True
+    if isinstance(value, str) and value.strip().upper() in ("", "UNKNOWN"):
+        return True
+    if isinstance(value, (int, float)) and value == 0:
+        # bools are ints: False (e.g. a defaulted pool flag) counts as empty,
+        # so a prior DCAD-confirmed True can be carried forward.
+        return True
+    return False
+
+
+def merge_prior_enrichment(deals: list[dict], prior_path: str) -> list[dict]:
+    """Carry prior enrichment into freshly scraped deals before the write.
+
+    Loads the previous current_deals.json at *prior_path* (tolerating absence
+    or corruption), keys it by normalize_deal_identity, and fills empty
+    ENRICHMENT_CARRY_FORWARD_FIELDS on each fresh record from its predecessor.
+    Mutates and returns *deals*.
+    """
+    prior_by_key: dict[tuple[str, str], dict] = {}
+    if os.path.exists(prior_path):
+        try:
+            with open(prior_path, encoding="utf-8") as fh:
+                for old in json.load(fh):
+                    key = normalize_deal_identity(old.get("county"),
+                                                  old.get("address"))
+                    prior_by_key[key] = old
+        except (OSError, ValueError) as exc:
+            print(f"  ⚠️ Merge-on-write: unreadable prior dataset ({exc!r}) "
+                  f"— continuing without carry-forward")
+            prior_by_key = {}
+
+    records_merged = fields_carried = 0
+    for fresh in deals:
+        prior = prior_by_key.get(
+            normalize_deal_identity(fresh.get("county"), fresh.get("address")))
+        if not prior:
+            continue
+        carried_here = 0
+        for field_name in ENRICHMENT_CARRY_FORWARD_FIELDS:
+            if _enrichment_field_is_empty(fresh.get(field_name)) and \
+                    not _enrichment_field_is_empty(prior.get(field_name)):
+                fresh[field_name] = prior[field_name]
+                carried_here += 1
+        if carried_here:
+            records_merged += 1
+            fields_carried += carried_here
+
+    print(f"  Merge-on-write: {records_merged}/{len(deals)} refreshed record(s), "
+          f"{fields_carried} enrichment field(s) carried forward from prior dataset")
+    return deals
 
 
 def load_prior_dataset():
@@ -159,6 +230,9 @@ def analyze_deal(cpr: CPR) -> dict:
 
 
 def main():
+    import logging
+    logging.basicConfig(level=logging.INFO,
+                        format="%(levelname)s %(name)s: %(message)s")
     print("=" * 70)
     print("  HERMES-REO — FULL DEAL FINDER")
     print(f"  Run time: {datetime.utcnow().isoformat()}")
@@ -250,7 +324,12 @@ def main():
     output_dir = os.path.join(os.path.dirname(__file__), "data")
     os.makedirs(output_dir, exist_ok=True)
 
-    deals_path = write_json(os.path.join(output_dir, "current_deals.json"), deals, default=str)
+    deals_file = os.path.join(output_dir, "current_deals.json")
+    # B2: merge prior enrichment BEFORE the atomic write so bulk-DCAD /
+    # geocode-backfill results survive this regeneration (see the
+    # MERGE-ON-WRITE comment above).
+    merge_prior_enrichment(deals, deals_file)
+    deals_path = write_json(deals_file, deals, default=str)
 
     stats_path = write_text(os.path.join(output_dir, "live_portfolio_stats.md"), report)
 

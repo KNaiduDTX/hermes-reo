@@ -8,6 +8,8 @@
 #   python3 pipeline.py --fixture                   # offline fixture run -> data/fixtures/
 #   python3 pipeline.py --live --county collin      # OPT-IN live scrape (network required)
 #   python3 pipeline.py --bulk-dcad                 # DCAD bulk cross-reference
+#   python3 pipeline.py --geocode-backfill          # OPT-IN Census geocode backfill (network)
+#   python3 pipeline.py --geocode-backfill --dry-run  # plan only — zero network
 #
 # Live scraping is strictly opt-in via --live. With no data mode selected the
 # runner prints a hint and exits 0 without touching the network.
@@ -17,12 +19,15 @@ import json
 import os
 import subprocess
 import sys
+import time
 from concurrent.futures import ThreadPoolExecutor
+import logging
 
 # Ensure src is importable
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 from src.io_utils import write_json, write_text  # atomic crash-safe writers (shared contract)
+from src import policy  # B4: single source of truth for decision-policy constants
 
 CHECK_TIMEOUT_SECONDS = 120
 CHECK_WORKERS = 4
@@ -47,6 +52,9 @@ MODE_HINT = """\
     pipeline.py --fixture                offline fixture run (writes data/fixtures/)
     pipeline.py --live --county collin   OPT-IN live portal scrape (network)
     pipeline.py --bulk-dcad              DCAD bulk cross-reference (Dallas CPRs)
+    pipeline.py --geocode-backfill [--dry-run]
+                                         OPT-IN Census geocode backfill into
+                                         current_deals.json (network; --dry-run plans only)
 
   Live scraping is opt-in: pass --live explicitly."""
 
@@ -330,13 +338,16 @@ def run_fixture_pipeline(allow_gate_fail_demo: bool = False):
     print("\n[5/7] UNDERWRITE — Fix-and-flip model")
     arv = val_obj.arv.value
     rehab = 50_000  # estimated rehab for a 2004 build, 4332 sqft
+    # B4: policy wiring — closing costs and MAO factor come from src.policy so
+    # this model can never drift from the Excel Assumptions tab again (the old
+    # inline arv*0.08 disagreed with the workbook's 7.5%).
     uw = flip_pnl(
-        arv=arv, purchase=mao(arv, rehab, 0.70), rehab=rehab,
+        arv=arv, purchase=mao(arv, rehab, policy.MAO_FACTOR_DEFAULT), rehab=rehab,
         holding=5_000, financing=10_000, closing_buy=5_000,
-        closing_sell=arv * 0.08,
+        closing_sell=arv * policy.CLOSING_SELL_PCT,
     )
     print(f"  Model: {uw.model}")
-    print(f"  MAO (70% rule): ${mao(arv, rehab, 0.70):,.0f}")
+    print(f"  MAO ({policy.MAO_FACTOR_DEFAULT:.0%} rule): ${mao(arv, rehab, policy.MAO_FACTOR_DEFAULT):,.0f}")
     print(f"  Purchase: ${uw.purchase_price:,.0f} | Rehab: ${uw.rehab:,.0f} (w/contingency: ${uw.line_items['rehab_with_contingency']:,.0f})")
     print(f"  Net profit: ${uw.net_profit:,.0f} | ROI: {uw.roi:.1%}")
 
@@ -344,7 +355,7 @@ def run_fixture_pipeline(allow_gate_fail_demo: bool = False):
     print("\n[6/7] PRICING — MAO, bid ceiling, offer ladder, sensitivity")
     pricing = price_deal(
         cpr, arv=arv, rehab=rehab, deal_type="DT-AUCTION",
-        factor=0.70, capital_at_risk=uw.cash_invested,
+        factor=policy.MAO_FACTOR_DEFAULT, capital_at_risk=uw.cash_invested,
     )
     print(f"  MAO: ${pricing.mao:,.0f}")
     print(f"  Bid ceiling: ${pricing.bid_ceiling:,.0f}")
@@ -521,17 +532,72 @@ def run_live_pipeline(county: str, limit: int, allow_gate_fail_demo: bool = Fals
         print("!! DEMO OVERRIDE (--allow-gate-fail-demo): exiting 0 despite gate blocks.")
 
 
+# B2: DCAD-derived CPR attributes → flat current_deals.json keys, for the
+# write-back below.
+DCAD_WRITEBACK_FIELDS = (
+    ("improvement_sqft", "sqft"),
+    ("beds", "beds"),
+    ("baths", "baths"),
+    ("year_built", "year_built"),
+    ("cad_appraised_value", "cad_value"),
+)
+
+
+def _write_back_dcad_fields(records: list[dict], dallas_cprs: list,
+                            pre_xref: dict) -> tuple[int, int]:
+    """B2: merge this run's DCAD enrichment into the parsed dataset records.
+
+    For each CPR enriched THIS RUN (value changed vs the pre-xref snapshot),
+    fill the matching record's flat key only where it is currently falsy —
+    fresher scraped data is never clobbered. Records are mutated in place and
+    the caller rewrites the whole file atomically, so unknown keys survive.
+    Returns (records_updated, fields_written).
+    """
+    from src.cpr import pv_value
+    from src.enrichment import normalize_deal_identity
+
+    rec_index = {
+        normalize_deal_identity(r.get("county"), r.get("address")): r
+        for r in records
+    }
+    records_updated = fields_written = 0
+    for cpr in dallas_cprs:
+        target = rec_index.get(
+            normalize_deal_identity(cpr.county, cpr.situs_address))
+        if target is None:
+            continue
+        touched = False
+        for attr, flat_key in DCAD_WRITEBACK_FIELDS:
+            new_val = pv_value(getattr(cpr, attr, None))
+            # Only fields actually enriched this run, into falsy slots only.
+            if new_val and new_val != pre_xref[id(cpr)][attr] \
+                    and not target.get(flat_key):
+                target[flat_key] = new_val
+                fields_written += 1
+                touched = True
+        if touched:
+            records_updated += 1
+    return records_updated, fields_written
+
+
 def _run_bulk_dcad():
-    """Run DCAD bulk cross-reference on all Dallas CPRs from the lucid-noether dataset.
+    """Run DCAD bulk cross-reference on all Dallas CPRs from current_deals.json.
 
     Uses the batch adapter with JSON cache (data/dcad_cache.json) and 2s rate limiting.
     Estimated runtime: ~2s per address × ~165 Dallas records ≈ 5-6 minutes.
+
+    AUDIT D1 fix: current_deals.json rows are FLAT (address/parcel_id/sqft/…),
+    so Dallas rows are enriched through enrich_from_flat_record — the legacy
+    enrich_from_raw_record expects the old nested details schema and used to
+    resolve every row to "Unknown", getting filtered out (silent no-op).
+    Enriched DCAD fields are written back into current_deals.json atomically
+    so find_deals.py's merge-on-write keeps them alive across regenerations.
     """
     print(f"\n{'=' * 70}")
     print("  HERMES-REO PIPELINE — DCAD BULK CROSS-REFERENCE")
     print(f"{'=' * 70}")
 
-    # Load the lucid-noether dataset
+    # Load the current deals dataset (flat schema)
     data_path = os.path.join(os.path.dirname(__file__), "data", "current_deals.json")
     if not os.path.exists(data_path):
         print(f"  No dataset found at {data_path}")
@@ -542,13 +608,15 @@ def _run_bulk_dcad():
         records = json.load(f)
 
     # Enrich Dallas records into CPRs
-    from src.enrichment import enrich_from_raw_record
+    from src.cpr import pv_value
+    from src.enrichment import enrich_from_flat_record
     from src.adapters.dallas_cad_bulk import cross_reference_dcad_bulk
 
     dallas_cprs = []
     for record in records:
         if record.get("county", "").lower() == "dallas":
-            cpr = enrich_from_raw_record(record)
+            # D1 FIX: flat schema → flat-record enricher (nested reader no-ops)
+            cpr = enrich_from_flat_record(record)
             if cpr and cpr.situs_address and cpr.situs_address != "Unknown":
                 dallas_cprs.append(cpr)
 
@@ -557,16 +625,149 @@ def _run_bulk_dcad():
         print("  No Dallas CPRs found — nothing to do.")
         return
 
+    # Pre-xref snapshot of the DCAD-derivable fields, so write-back touches
+    # only values THIS run actually enriched.
+    pre_xref = {
+        id(cpr): {attr: pv_value(getattr(cpr, attr, None))
+                  for attr, _ in DCAD_WRITEBACK_FIELDS}
+        for cpr in dallas_cprs
+    }
+
     # Run bulk cross-reference (limit 50 per run to avoid long sessions)
     updated = cross_reference_dcad_bulk(dallas_cprs, batch_limit=50)
     print(f"  CPRs updated with DCAD data: {updated}")
     print("  Cache saved to: data/dcad_cache.json")
+
+    # B2: write the enriched DCAD fields back into current_deals.json
+    # atomically (unknown keys preserved; only falsy slots filled).
+    records_updated, fields_written = _write_back_dcad_fields(
+        records, dallas_cprs, pre_xref)
+    if fields_written:
+        write_json(data_path, records)
+        print(f"  Write-back: {fields_written} field(s) into "
+              f"{records_updated} record(s) → {data_path} (atomic)")
+    else:
+        print("  Write-back: nothing new to persist")
+
     print(f"\n{'=' * 70}")
-    print(f"  DCAD BULK COMPLETE — {updated} enriched, {len(dallas_cprs) - updated} skipped/failed")
+    print(f"  DCAD BULK COMPLETE — {updated} enriched, "
+          f"{len(dallas_cprs) - updated} skipped/failed, "
+          f"{fields_written} field(s) written back")
     print(f"{'=' * 70}")
 
 
+GEOCODE_BACKFILL_CAP = 25  # hard cap: addresses geocoded per invocation
+
+
+def _record_missing_coords(record: dict) -> bool:
+    """True when latitude/longitude are absent, unparsable, or zero."""
+    def _num(key: str):
+        val = record.get(key)
+        if val is None or val == "":
+            return None
+        try:
+            return float(val)
+        except (TypeError, ValueError):
+            return None
+
+    lat, lng = _num("latitude"), _num("longitude")
+    return not (lat and lng)  # catches None, 0.0, and unparsable junk
+
+
+def _run_geocode_backfill(dry_run: bool = False,
+                          cap: int = GEOCODE_BACKFILL_CAP):
+    """B3: backfill missing coordinates in current_deals.json via Census.
+
+    Strictly OPT-IN (--geocode-backfill): performs network calls against
+    src.adapters.census.geocode_address at the adapter rate limit
+    (GEOCODE_RATE_LIMIT_S), hard-capped at *cap* addresses per invocation.
+    Results are written back into the dataset atomically like the DCAD
+    write-back (only falsy slots filled, unknown keys preserved).
+    --dry-run prints what WOULD be geocoded and performs ZERO network calls;
+    without --geocode-backfill this code path is never reached at all.
+    """
+    print(f"\n{'=' * 70}")
+    print(f"  HERMES-REO PIPELINE — CENSUS GEOCODE BACKFILL"
+          f"{' (DRY RUN)' if dry_run else ''}")
+    print(f"{'=' * 70}")
+
+    data_path = os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                             "data", "current_deals.json")
+    if not os.path.exists(data_path):
+        print(f"  No dataset found at {data_path}")
+        print("  Run find_deals.py first to generate current_deals.json")
+        return
+
+    with open(data_path) as f:
+        records = json.load(f)
+
+    missing = [
+        rec for rec in records
+        if rec.get("address") and rec.get("address") != "Unknown"
+        and _record_missing_coords(rec)
+    ]
+    targets = missing[:cap]
+
+    print(f"  Records in dataset: {len(records)}")
+    print(f"  Missing coordinates (geocodable address): {len(missing)}")
+    print(f"  Selected this run (hard cap {cap}): {len(targets)}")
+
+    if dry_run:
+        for rec in targets:
+            print(f"    [dry-run] would geocode: {rec['address']}")
+        print(f"  DRY RUN complete — {len(targets)} of {len(missing)} candidate(s) "
+              f"would be geocoded; ZERO network performed, nothing written.")
+        return
+
+    if not targets:
+        print("  Nothing to geocode — every record already has coordinates.")
+        return
+
+    from src.adapters.census import geocode_address, GEOCODE_RATE_LIMIT_S
+
+    succeeded = failed = 0
+    failure_reasons: dict[str, int] = {}
+    for n, rec in enumerate(targets, 1):
+        address = rec["address"]
+        result = geocode_address(address)
+        status = str(result.get("status", "UnknownStatus"))
+        if result.get("status") == "Success" \
+                and result.get("latitude") and result.get("longitude"):
+            rec["latitude"] = float(result["latitude"])
+            rec["longitude"] = float(result["longitude"])
+            # Free census context rides along; fill only currently-falsy slots.
+            if not rec.get("census_tract") and result.get("census_tract"):
+                rec["census_tract"] = result["census_tract"]
+            if not rec.get("county_fips") and result.get("county_fips"):
+                rec["county_fips"] = result["county_fips"]
+            succeeded += 1
+            print(f"  [{n}/{len(targets)}] ✓ {address} → "
+                  f"({result['latitude']:.5f}, {result['longitude']:.5f})")
+        else:
+            failed += 1
+            failure_reasons[status] = failure_reasons.get(status, 0) + 1
+            print(f"  [{n}/{len(targets)}] ✗ {address} → {status}")
+        if n < len(targets):
+            time.sleep(GEOCODE_RATE_LIMIT_S)  # adapter rate limit between calls
+
+    if succeeded:
+        write_json(data_path, records)  # atomic write-back (B2 pattern)
+        print(f"  Write-back: {succeeded} record(s) geocoded → {data_path} (atomic)")
+    else:
+        print("  Write-back: nothing succeeded — dataset left untouched")
+
+    print(f"  Geocode backfill done: {succeeded} ok, {failed} failed "
+          f"(cap {cap})")
+    if failure_reasons:
+        tally = ", ".join(f"{reason}: {count}"
+                          for reason, count in sorted(failure_reasons.items()))
+        print(f"  Failure tally: {tally}")
+
+
 def main():
+    # Library modules (src/**) log via logging; surface on stderr.
+    logging.basicConfig(level=logging.INFO,
+                        format="%(levelname)s %(name)s: %(message)s")
     parser = argparse.ArgumentParser(description="HERMES-REO Pipeline Runner")
     parser.add_argument("--county", default="collin", choices=["collin", "dallas", "grayson"])
     parser.add_argument("--limit", type=int, default=1, help="Max records to process")
@@ -577,11 +778,16 @@ def main():
     parser.add_argument("--live", action="store_true",
                         help="OPT-IN: enable live portal scraping (network). Required for the live branch.")
     parser.add_argument("--bulk-dcad", action="store_true", help="Run DCAD bulk cross-reference on all Dallas CPRs")
+    parser.add_argument("--geocode-backfill", action="store_true",
+                        help="OPT-IN network op: Census-geocode current_deals.json records "
+                             "missing lat/lng (rate-limited, hard cap 25 per invocation)")
+    parser.add_argument("--dry-run", action="store_true",
+                        help="With --geocode-backfill: print the plan without any network call")
     parser.add_argument("--allow-gate-fail-demo", action="store_true",
                         help="Continue past GATE-LEGAL-LIEN fail/hitl (demo only — loud banner printed)")
     args = parser.parse_args()
 
-    mode_selected = args.live or args.fixture or args.bulk_dcad
+    mode_selected = args.live or args.fixture or args.bulk_dcad or args.geocode_backfill
     checks_requested = args.all_checks or args.checks_only
 
     # --checks-only always means checks-and-exit. When checks were requested but
@@ -602,7 +808,10 @@ def main():
             sys.exit(1)
         print("✓ All checks passed.\n")
 
-    if args.bulk_dcad:
+    if args.geocode_backfill:
+        # B3: unreachable unless the flag is passed — no network otherwise.
+        _run_geocode_backfill(dry_run=args.dry_run)
+    elif args.bulk_dcad:
         _run_bulk_dcad()
     elif args.fixture:
         run_fixture_pipeline(allow_gate_fail_demo=args.allow_gate_fail_demo)
