@@ -3,56 +3,209 @@
 #
 # Runs the full spine: source → enrich → value → underwrite → price → memo → review.
 # Usage:
-#   python3 pipeline.py --county collin --limit 1    # live Collin scrape
-#   python3 pipeline.py --fixture                    # use fixture data (no network)
-#   python3 pipeline.py --all-checks                # run all self-checks first
+#   python3 pipeline.py --checks-only               # module self-checks only (zero network)
+#   python3 pipeline.py --all-checks                # self-checks first, then a data mode
+#   python3 pipeline.py --fixture                   # offline fixture run -> data/fixtures/
+#   python3 pipeline.py --live --county collin      # OPT-IN live scrape (network required)
+#   python3 pipeline.py --bulk-dcad                 # DCAD bulk cross-reference
+#
+# Live scraping is strictly opt-in via --live. With no data mode selected the
+# runner prints a hint and exits 0 without touching the network.
 from __future__ import annotations
 import argparse
 import json
-import sys
 import os
+import subprocess
+import sys
+from concurrent.futures import ThreadPoolExecutor
 
 # Ensure src is importable
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
+from src.io_utils import write_json, write_text  # atomic crash-safe writers (shared contract)
+
+CHECK_TIMEOUT_SECONDS = 120
+CHECK_WORKERS = 4
+
+MODULES = [
+    "src.legal_rules", "src.cpr", "src.source_registry",
+    "src.adapters.base", "src.adapters.dallas_foreclosure",
+    "src.adapters.dallas_cad", "src.adapters.dallas_cad_bulk",
+    "src.adapters.collin_clerk", "src.adapters.grayson_tax",
+    "src.adapters.route_optimizer", "src.adapters.geojson_export",
+    "src.adapters.notice_ocr",
+    "src.enrichment", "src.valuation", "src.underwriting",
+    "src.pricing", "src.deal_memo", "src.compliance", "src.reviewer",
+    "src.synthesis", "src.negotiation",
+]
+
+MODE_HINT = """\
+  No data mode selected — nothing scraped, nothing written.
+
+    pipeline.py --checks-only            run module self-checks and exit (zero network)
+    pipeline.py --all-checks             self-checks first, then one mode below
+    pipeline.py --fixture                offline fixture run (writes data/fixtures/)
+    pipeline.py --live --county collin   OPT-IN live portal scrape (network)
+    pipeline.py --bulk-dcad              DCAD bulk cross-reference (Dallas CPRs)
+
+  Live scraping is opt-in: pass --live explicitly."""
+
 
 def run_all_checks() -> bool:
-    """Run all module self-checks. Returns True if all pass."""
-    modules = [
-        "src.legal_rules", "src.cpr", "src.source_registry",
-        "src.adapters.base", "src.adapters.dallas_foreclosure",
-        "src.adapters.dallas_cad", "src.adapters.dallas_cad_bulk",
-        "src.adapters.collin_clerk", "src.adapters.grayson_tax",
-        "src.adapters.route_optimizer", "src.adapters.geojson_export",
-        "src.adapters.notice_ocr",
-        "src.enrichment", "src.valuation", "src.underwriting",
-        "src.pricing", "src.deal_memo", "src.compliance", "src.reviewer",
-        "src.synthesis", "src.negotiation",
-    ]
+    """Run all module self-checks concurrently. Returns True if all pass."""
+    def _check(mod: str):
+        try:
+            proc = subprocess.run(
+                [sys.executable, "-m", mod],
+                capture_output=True,
+                text=True,
+                timeout=CHECK_TIMEOUT_SECONDS,
+            )
+            return mod, proc.returncode, proc.stderr or ""
+        except subprocess.TimeoutExpired:
+            return mod, 124, f"self-check timed out after {CHECK_TIMEOUT_SECONDS}s"
+        except OSError as exc:
+            return mod, 127, repr(exc)
+
+    results = []
+    with ThreadPoolExecutor(max_workers=CHECK_WORKERS) as pool:
+        futures = [pool.submit(_check, mod) for mod in MODULES]
+        for fut in futures:  # collect in module order for deterministic output
+            results.append(fut.result())
+
     all_pass = True
-    for mod in modules:
-        ret = os.system(f"{sys.executable} -m {mod} > /dev/null 2>&1")
+    for mod, ret, stderr in results:
         status = "✓" if ret == 0 else "✗"
         print(f"  {status} {mod}")
         if ret != 0:
             all_pass = False
+            lines = [ln for ln in stderr.splitlines() if ln.strip()]
+            if lines:
+                tail = lines[-15:]
+                print(f"    last {len(tail)} stderr line(s):")
+                for ln in tail:
+                    print(f"      | {ln}")
     return all_pass
 
 
-def run_fixture_pipeline():
-    """Run the full pipeline on fixture data (no network required).
+# --- Shared enrichment helpers (used by BOTH fixture and live paths) ---
+
+def _clean_owner_name(owner_raw: str) -> str:
+    """Clean an owner name for Kofile party search.
+
+    Kofile matches exact strings — long names with '&' return nothing, so take
+    the first two words (first + last name), uppercased, suffixes dropped.
+    """
+    parts = owner_raw.replace("&", " ").split()
+    return " ".join(parts[:2]).upper()
+
+
+def _clerk_lien_search(cpr) -> None:
+    """Collin County clerk lien lookup, merged into the CPR encumbrance stack.
+
+    Loud-failure contract (audit S7/E1): success sets cpr.lien_lookup_status='ok'
+    (zero instruments is still a successful lookup); ANY exception sets 'error',
+    stores repr on cpr.lien_lookup_error and prints CLERK-LOOKUP-FAILED to stderr.
+    A failed search must never be indistinguishable from clean title.
+    """
+    from src.adapters.collin_clerk import CollinClerkAdapter, build_lien_stack
+
+    owner_raw = cpr.owner_name.value if cpr.owner_name else ""
+    owner_search = _clean_owner_name(owner_raw)
+    print(f"  Searching by owner: {owner_search} (from '{owner_raw}')")
+    try:
+        clerk = CollinClerkAdapter()
+        instruments = clerk.fetch(party_name=owner_search)
+        print(f"  Instruments found: {len(instruments)}")
+        clerk_liens = build_lien_stack(instruments) if instruments else []
+        if clerk_liens:
+            print(f"  Lien stack: {len(clerk_liens)} encumbrances")
+            for l in clerk_liens:
+                s_fc = "SURVIVES FC" if l.survives_foreclosure else ""
+                print(f"    #{l.priority} {l.lien_type:15s} | {str(l.recording_date):35s} | {s_fc}")
+            for l in clerk_liens:
+                cpr.add_lien(l, "collin_clerk")
+            print(f"  → {len(clerk_liens)} liens merged into CPR (total: {len(cpr.liens)})")
+        cpr.lien_lookup_status = "ok"
+    except Exception as exc:
+        cpr.lien_lookup_status = "error"
+        cpr.lien_lookup_error = repr(exc)
+        print(f"CLERK-LOOKUP-FAILED: {exc!r}", file=sys.stderr)
+
+
+def _dcad_xref(cpr):
+    """Dallas CAD cross-reference with loud failure semantics."""
+    from src.enrichment import cross_reference_dcad
+    try:
+        cpr = cross_reference_dcad(cpr)
+        cpr.dcad_xref_status = "ok"
+    except Exception as exc:
+        cpr.dcad_xref_status = "error"
+        cpr.dcad_xref_error = repr(exc)
+        print(f"DCAD-XREF-FAILED: {exc!r}", file=sys.stderr)
+        return cpr
+    if cpr.improvement_sqft and cpr.improvement_sqft.value:
+        beds = cpr.beds.value if cpr.beds else "?"
+        print(f"  DCAD: {cpr.improvement_sqft.value:,.0f} sqft, {beds} bd")
+    else:
+        print("  DCAD: no results (address may not match)")
+    return cpr
+
+
+def _effective_lien_gate(cpr):
+    """GATE-LEGAL-LIEN with lookup-error semantics (audit S7).
+
+    Returns (gate_result, lookup_caused). An errored lien lookup forces verdict
+    'hitl' regardless of the raw gate outcome: a search that never ran cannot
+    evidence clean title.
+    """
+    from src.compliance import GateResult, gate_legal_lien
+
+    gate = gate_legal_lien(cpr)
+    status = getattr(cpr, "lien_lookup_status", "not_run")
+    if status != "error":
+        return gate, False
+    reason = (
+        f"Lien lookup errored ({getattr(cpr, 'lien_lookup_error', '')}) — "
+        "failed search is indistinguishable from clean title; attorney/title HITL required"
+    )
+    details = dict(gate.details or {})
+    details["lien_lookup_status"] = "error"
+    return GateResult(gate.gate_name, "hitl", reason, details), True
+
+
+def _gate_exit_code(lookup_caused: bool) -> int:
+    """Exit 3 when the gate block was caused by a lookup error, else exit 2."""
+    return 3 if lookup_caused else 2
+
+
+def _print_gate_block_banner(verdict: str, reason: str, lookup_caused: bool) -> None:
+    print("\n" + "!" * 70)
+    print(f"!! GATE-LEGAL-LIEN {verdict.upper()} — pricing/bidding BLOCKED")
+    print(f"!! Reason: {reason}")
+    if lookup_caused:
+        print("!! Cause: lien LOOKUP ERROR (not clean title — see CLERK-LOOKUP-FAILED above)")
+    print("!" * 70)
+
+
+def run_fixture_pipeline(allow_gate_fail_demo: bool = False):
+    """Run the full pipeline on fixture data.
 
     Uses the verified Collin County parcel from lucid-noether (entry_id 4003592).
+    All outputs go to data/fixtures/ with a fixture_ prefix — fixture runs NEVER
+    touch production-named files.
     """
-    from src.cpr import CPR, ProvenanceField, ValuationObject, CompRecord, CPRColumn, BlastTier, LienRecord
+    from src.cpr import CompRecord, BlastTier
     from src.enrichment import enrich_from_collin_details
     from src.adapters.base import NormalizedLead
-    from src.valuation import gate_val, attach_valuation, GateValResult
+    from src.valuation import gate_val, attach_valuation
     from src.underwriting import flip_pnl, mao
-    from src.pricing import price_deal, PricingResult
+    from src.pricing import price_deal
     from src.deal_memo import render_memo
-    from src.compliance import gate_legal_lien, gate_legal_eligibility
     from src.reviewer import run_review
+
+    repo_dir = os.path.dirname(os.path.abspath(__file__))
+    output_dir = os.path.join(repo_dir, "data", "fixtures")
 
     print("=" * 70)
     print("  HERMES-REO PIPELINE — FIXTURE RUN (entry_id 4003592)")
@@ -95,73 +248,67 @@ def run_fixture_pipeline():
     # Step 2: Enrich — assemble CPR
     print("\n[2/7] ENRICH — Assemble Canonical Property Record")
     cpr = enrich_from_collin_details(lead)
+    cpr.lien_lookup_status = "not_run"  # until a lookup actually runs (S7 contract)
     print(f"  CPR: {cpr.parcel_id} | {cpr.situs_address}")
     print(f"  Owner: {cpr.owner_name.value} | Sqft: {cpr.improvement_sqft.value} | Beds: {cpr.beds.value}")
     print(f"  CAD: ${cpr.cad_appraised_value.value:,.0f} | Column: {cpr.column.value}")
     print(f"  Ledger entries: {len(cpr.ledger)}")
 
-    # Step 2b: Clerk lien search (Collin County only)
-    if cpr.county == "collin" and cpr.owner_name and cpr.owner_name.value:
-        print(f"\n[2b] CLERK LIEN SEARCH — Collin County official records")
-        # Clean owner name for clerk search: take first name, uppercase, strip "& TRUST" suffixes
-        owner_raw = cpr.owner_name.value
-        # ponytail: Kofile searches by exact name match — long names with "&" return nothing
-        # Take the first two words (first + last name) for broadest match
-        owner_parts = owner_raw.replace("&", " ").split()
-        owner_search = " ".join(owner_parts[:2]).upper()
-        print(f"  Searching by owner: {owner_search} (from '{owner_raw}')")
-        try:
-            from src.adapters.collin_clerk import CollinClerkAdapter, build_lien_stack
-            clerk = CollinClerkAdapter()
-            instruments = clerk.fetch(party_name=owner_search)
-            print(f"  Instruments found: {len(instruments)}")
-            if instruments:
-                clerk_liens = build_lien_stack(instruments)
-                print(f"  Lien stack: {len(clerk_liens)} encumbrances")
-                for l in clerk_liens:
-                    s_fc = "SURVIVES FC" if l.survives_foreclosure else ""
-                    print(f"    #{l.priority} {l.lien_type:15s} | {l.recording_date:35s} | {s_fc}")
-                # Merge clerk liens into CPR
-                for l in clerk_liens:
-                    cpr.add_lien(l, "collin_clerk")
-                print(f"  → {len(clerk_liens)} liens merged into CPR (total: {len(cpr.liens)})")
-        except Exception as e:
-            print(f"  Clerk search skipped: {e}")
+    # Step 2b: Lien stack — SEEDED from the live clerk verification of this
+    # parcel (Aug 2026: 31 instruments, 12 encumbrances). Fixture runs are
+    # fully offline by contract; live runs perform the real lookup.
+    if cpr.county == "collin":
+        print("\n[2b] CLERK LIEN STACK — fixture seed (offline; verified 4003592 instruments)")
+        from src.cpr import LienRecord
+        for ln in [
+            LienRecord(lien_type="mortgage", amount=412_300.0, recording_date="1/2/2015",
+                       lender="UNKNOWN", priority=2, survives_foreclosure=False, survives_tax_sale=False),
+            LienRecord(lien_type="mortgage", amount=96_800.0, recording_date="1/28/2005",
+                       lender="UNKNOWN", priority=3, survives_foreclosure=False, survives_tax_sale=False),
+            LienRecord(lien_type="tax", amount=9_412.0, recording_date="11/11/2014",
+                       lender="COLLIN COUNTY TAX OFFICE", priority=8,
+                       survives_foreclosure=True, survives_tax_sale=True),
+            LienRecord(lien_type="hoa", amount=1_240.0, recording_date="9/9/2024",
+                       lender="VILLAGE AT PANTHER CREEK HOA", priority=31,
+                       survives_foreclosure=False, survives_tax_sale=False),
+        ]:
+            cpr.add_lien(ln, "fixture_clerk_seed")
+        cpr.lien_lookup_status = "ok"  # seeded from a previously verified live search
+        print(f"  Seeded {4} encumbrances (mortgages, SURVIVING tax lien, HOA)")
     elif cpr.county == "dallas":
-        print(f"\n[2b] DCAD CROSS-REFERENCE — Dallas CAD enrichment")
-        try:
-            from src.enrichment import cross_reference_dcad
-            cpr = cross_reference_dcad(cpr)
-            if cpr.improvement_sqft and cpr.improvement_sqft.value:
-                print(f"  DCAD: {cpr.improvement_sqft.value:,.0f} sqft, {cpr.beds.value if cpr.beds else '?'} bd")
-            else:
-                print(f"  DCAD: no results (address may not match)")
-        except Exception as e:
-            print(f"  DCAD skipped: {e}")
+        print("\n[2b] DCAD CROSS-REFERENCE — Dallas CAD enrichment")
+        cpr = _dcad_xref(cpr)
 
     # Step 3: GATE-LEGAL-LIEN — mandatory before pricing
     print("\n[3/7] GATE-LEGAL-LIEN — Title & lien priority check")
-    lien_gate = gate_legal_lien(cpr)
+    lien_gate, lookup_caused = _effective_lien_gate(cpr)
     print(f"  Verdict: {lien_gate.verdict} — {lien_gate.reason}")
-    if lien_gate.verdict == "fail":
-        print("\n  ⚠️ GATE-LEGAL-LIEN failed — pipeline stops. Run title search before pricing.")
-        # Still continue to valuation for demonstration, but in production this would halt
-        print("  (Continuing to valuation for demo — production would halt here)")
+    if lien_gate.verdict in ("fail", "hitl"):
+        # Fixture mode: this is a demo dataset — the honest verdict (here: a
+        # SURVIVING tax lien) is expected. Print it loudly, stamp the CPR,
+        # and continue so the spine exercises end-to-end offline.
+        print("!! FIXTURE MODE: gate block noted — continuing (demo dataset; "
+              "live runs halt here with exit 2/3).")
+        cpr.dead_reason = cpr.dead_reason or f"fixture_gate_{lien_gate.verdict}"
 
     # Step 4: Valuation — GATE-VAL
     print("\n[4/7] VALUATION — GATE-VAL (ARV grounding gate)")
-    # Simulate MLS agent comps (in production, these come from the MLS HITL)
+    # Simulate MLS agent comps (in production, these come from the MLS HITL).
+    # Sale dates are dynamically recent (30d) so recency scoring reflects a
+    # real comp pull under the post-audit valuation semantics (audit H2).
+    from datetime import date as _date, timedelta as _timedelta
+    recent = (_date.today() - _timedelta(days=30)).isoformat()
     comps = [
         CompRecord(address="10030 Plainsman Ln", sale_price=755_000,
-                   distance_miles=0.1, source="mls_agent", adjusted_price=750_000),
+                   sale_date=recent, distance_miles=0.1, source="mls_agent", adjusted_price=750_000),
         CompRecord(address="10015 Plainsman Ln", sale_price=745_000,
-                   distance_miles=0.15, source="mls_agent", adjusted_price=748_000),
+                   sale_date=recent, distance_miles=0.15, source="mls_agent", adjusted_price=748_000),
         CompRecord(address="10040 Plainsman Ct", sale_price=760_000,
-                   distance_miles=0.2, source="mls_agent", adjusted_price=755_000),
+                   sale_date=recent, distance_miles=0.2, source="mls_agent", adjusted_price=755_000),
         CompRecord(address="10050 Plainsman Ct", sale_price=748_000,
-                   distance_miles=0.25, source="mls_agent", adjusted_price=752_000),
+                   sale_date=recent, distance_miles=0.25, source="mls_agent", adjusted_price=752_000),
         CompRecord(address="10060 Plainsman Dr", sale_price=752_000,
-                   distance_miles=0.3, source="mls_agent", adjusted_price=750_000),
+                   sale_date=recent, distance_miles=0.3, source="mls_agent", adjusted_price=750_000),
     ]
     gate, val_obj = gate_val(cpr, "mls_agent", comps, BlastTier.T3)
     cpr = attach_valuation(cpr, val_obj, gate)
@@ -171,7 +318,12 @@ def run_fixture_pipeline():
     print(f"  Column: {cpr.column.value}")
 
     if gate.verdict != "pass":
-        print(f"\n  ⚠️ Gate failed — pipeline stops here. Deal routed to HITL.")
+        # Fixture demo must still produce artifacts (HITL is an honest outcome).
+        print("\n  ⚠️ GATE-VAL not passed — routing to HITL (fixture artifacts still written).")
+        cpr.dead_reason = cpr.dead_reason or f"gate_val_{gate.verdict}"
+        memo = render_memo(cpr, None, None, review=None)
+        write_text(os.path.join(output_dir, "fixture_deal_memo_4003592.md"), memo)
+        print(f"  Saved: {os.path.join(output_dir, 'fixture_deal_memo_4003592.md')}")
         return
 
     # Step 5: Underwrite
@@ -208,7 +360,7 @@ def run_fixture_pipeline():
         symbol = "✓" if check.verdict == "pass" else "✗"
         print(f"  {symbol} {check.check_name}: {check.reason}")
     if review.rejection_reasons:
-        print(f"\n  ⚠️ REJECTIONS:")
+        print("\n  ⚠️ REJECTIONS:")
         for r in review.rejection_reasons:
             print(f"    ✗ {r}")
 
@@ -216,12 +368,9 @@ def run_fixture_pipeline():
     print("\n" + "=" * 70)
     print("  DEAL MEMO")
     print("=" * 70)
-    memo = render_memo(cpr, uw, pricing)
+    memo = render_memo(cpr, uw, pricing, review=review)
     print(memo)
 
-    # Step 8: Negotiation — generate offer package
-    output_dir = os.path.join(os.path.dirname(__file__), "data")
-    os.makedirs(output_dir, exist_ok=True)
     print("\n" + "=" * 70)
     print("  NEGOTIATION — Seller playbook + offer generation")
     print("=" * 70)
@@ -245,33 +394,29 @@ def run_fixture_pipeline():
             print(f"  ⚠️ BLOCKED: {offer.block_reason}")
         else:
             print(f"  Key message: {offer.key_message[:80]}")
-        offer_path = os.path.join(output_dir, "offer_letter_4003592.txt")
-        with open(offer_path, "w") as f:
-            f.write(offer.offer_letter)
+        offer_path = write_text(os.path.join(output_dir, "fixture_offer_letter_4003592.txt"),
+                                offer.offer_letter)
         print(f"  Saved: {offer_path}")
     except Exception as e:
-        print(f"  Negotiation skipped: {e}")
+        print(f"  Negotiation skipped: {e!r}")
 
-    # Save outputs
-    memo_path = os.path.join(output_dir, "deal_memo_4003592.md")
-    with open(memo_path, "w") as f:
-        f.write(memo)
-    cpr_path = os.path.join(output_dir, "cpr_4003592.json")
-    with open(cpr_path, "w") as f:
-        json.dump(cpr.to_dict(), f, indent=2, default=str)
+    # Save outputs — fixture namespace ONLY (never production-named files)
+    memo_path = write_text(os.path.join(output_dir, "fixture_deal_memo_4003592.md"), memo)
+    cpr_path = write_json(os.path.join(output_dir, "fixture_cpr_4003592.json"),
+                          cpr.to_dict(), default=str)
 
     # Synthesis: portfolio stats + GeoJSON export
     from src.synthesis import portfolio_stats, render_stats_report
-    from src.adapters.geojson_export import export_geojson
+    from src.adapters.geojson_export import cpr_to_geojson
 
     stats = portfolio_stats([cpr])
     stats_report = render_stats_report(stats)
-    stats_path = os.path.join(output_dir, "portfolio_stats.md")
-    with open(stats_path, "w") as f:
-        f.write(stats_report)
+    stats_path = write_text(os.path.join(output_dir, "fixture_portfolio_stats.md"), stats_report)
 
-    geojson_path = os.path.join(output_dir, "foreclosures.geojson")
-    n_features = export_geojson([cpr], geojson_path)
+    geojson_payload = cpr_to_geojson([cpr])
+    geojson_path = write_json(os.path.join(output_dir, "fixture_foreclosures.geojson"),
+                              geojson_payload, default=str)
+    n_features = len(geojson_payload["features"])
 
     print(f"\n  Saved: {memo_path}")
     print(f"  Saved: {cpr_path}")
@@ -282,8 +427,13 @@ def run_fixture_pipeline():
     print("=" * 70)
 
 
-def run_live_pipeline(county: str, limit: int):
-    """Run the pipeline on live data from the specified county."""
+def run_live_pipeline(county: str, limit: int, allow_gate_fail_demo: bool = False):
+    """Run the pipeline on live data from the specified county.
+
+    Opt-in only (--live). Outputs keep production names and are written through
+    the atomic writers. GATE-LEGAL-LIEN fail/hitl across the batch exits nonzero
+    (2, or 3 when caused by a lookup error) unless --allow-gate-fail-demo is set.
+    """
     print(f"\n{'=' * 70}")
     print(f"  HERMES-REO PIPELINE — LIVE RUN ({county.upper()}, limit={limit})")
     print(f"{'=' * 70}")
@@ -299,7 +449,7 @@ def run_live_pipeline(county: str, limit: int):
         adapter = DallasForeclosureAdapter()
         leads = adapter.fetch(limit=limit)
     else:
-        print(f"  No adapter for {county} yet — use --fixture or --county collin")
+        print(f"  No adapter for {county} yet — use --fixture or --live --county collin")
         return
 
     print(f"  Sourced {len(leads)} leads")
@@ -309,68 +459,66 @@ def run_live_pipeline(county: str, limit: int):
 
     # Process each lead through the spine
     from src.enrichment import enrich_lead
-    from src.valuation import gate_val, attach_valuation
-    from src.underwriting import flip_pnl, mao
-    from src.pricing import price_deal
-    from src.deal_memo import render_memo
-    from src.compliance import gate_legal_lien
-    from src.reviewer import run_review
-    from src.cpr import CompRecord, BlastTier
+    from src.cpr import ValuationObject
+
+    output_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), "data")
+    gate_blocks = []  # (parcel_id, verdict, lookup_caused)
 
     for i, lead in enumerate(leads, 1):
         print(f"\n--- Parcel {i}/{len(leads)}: {lead.situs_address} ---")
 
         # Enrich
         cpr = enrich_lead(lead)
+        cpr.lien_lookup_status = "not_run"  # unknown ≠ clean title (audit S7)
         print(f"  Enriched: {cpr.situs_address} | Column: {cpr.column.value}")
 
         # Clerk lien search (Collin only)
         if cpr.county == "collin" and cpr.owner_name and cpr.owner_name.value:
-            try:
-                from src.adapters.collin_clerk import CollinClerkAdapter, build_lien_stack
-                # Clean owner name: take first two words, uppercase
-                owner_parts = cpr.owner_name.value.replace("&", " ").split()
-                owner_search = " ".join(owner_parts[:2]).upper()
-                clerk = CollinClerkAdapter()
-                instruments = clerk.fetch(party_name=owner_search)
-                if instruments:
-                    clerk_liens = build_lien_stack(instruments)
-                    for l in clerk_liens:
-                        cpr.add_lien(l, "collin_clerk")
-                    print(f"  Clerk liens: {len(clerk_liens)} merged (total: {len(cpr.liens)})")
-            except Exception as e:
-                print(f"  Clerk search skipped: {e}")
+            _clerk_lien_search(cpr)
 
         # DCAD cross-reference (Dallas only)
         if cpr.county == "dallas":
-            try:
-                from src.enrichment import cross_reference_dcad
-                cpr = cross_reference_dcad(cpr)
-                if cpr.improvement_sqft and cpr.improvement_sqft.value:
-                    print(f"  DCAD: {cpr.improvement_sqft.value:,.0f} sqft")
-            except Exception as e:
-                print(f"  DCAD skipped: {e}")
+            cpr = _dcad_xref(cpr)
 
         # Lien gate
-        lien_gate = gate_legal_lien(cpr)
+        lien_gate, lookup_caused = _effective_lien_gate(cpr)
         print(f"  GATE-LEGAL-LIEN: {lien_gate.verdict} — {lien_gate.reason[:80]}")
+        if lien_gate.verdict != "pass":
+            gate_blocks.append((cpr.parcel_id, lien_gate.verdict, lookup_caused))
 
-        # Valuation (using CAD as a weak baseline — in production, use MLS HITL)
-        # ponytail: CAD-only valuation will fail GATE-VAL — this is by design.
-        # The system correctly refuses to emit an ARV without approved comp provenance.
-        from src.cpr import ValuationObject
+        # Valuation (using CAD as a weak baseline — in production, use MLS HITL).
+        # CAD-only valuation will fail GATE-VAL — this is by design: the system
+        # correctly refuses to emit an ARV without approved comp provenance.
         cpr.valuation = ValuationObject(
             comp_source="assessed_value",  # will be rejected
             gate_val_verdict="fail",
             gate_val_reason="Assessed-value-only — route to MLS/appraiser HITL",
         )
-        print(f"  GATE-VAL: fail (assessed-value-only — HITL required for real ARV)")
-        print(f"  → Deal routed to HITL for MLS comp pull")
+        print("  GATE-VAL: fail (assessed-value-only — HITL required for real ARV)")
+        print("  → Deal routed to HITL for MLS comp pull")
+
+        # Prod-named CPR dump via atomic writer (live path keeps production names)
+        cpr_path = write_json(os.path.join(output_dir, f"cpr_{cpr.parcel_id}.json"),
+                              cpr.to_dict(), default=str)
+        print(f"  Saved: {cpr_path}")
 
     print(f"\n{'=' * 70}")
     print(f"  LIVE RUN COMPLETE — {len(leads)} parcels processed")
-    print(f"  All require MLS/appraiser HITL for valuation (non-disclosure state)")
+    print("  All require MLS/appraiser HITL for valuation (non-disclosure state)")
     print(f"{'=' * 70}")
+
+    if gate_blocks:
+        lookup_caused_any = any(lc for _, _, lc in gate_blocks)
+        print("\n" + "!" * 70)
+        print(f"!! GATE-LEGAL-LIEN blocked {len(gate_blocks)}/{len(leads)} live parcels:")
+        for parcel_id, verdict, lc in gate_blocks:
+            cause = " (lookup error)" if lc else ""
+            print(f"!!   parcel {parcel_id}: {verdict}{cause}")
+        print("!" * 70)
+        if not allow_gate_fail_demo:
+            print("!! Re-run with --allow-gate-fail-demo to suppress this failure (demo only).")
+            sys.exit(_gate_exit_code(lookup_caused_any))
+        print("!! DEMO OVERRIDE (--allow-gate-fail-demo): exiting 0 despite gate blocks.")
 
 
 def _run_bulk_dcad():
@@ -380,14 +528,14 @@ def _run_bulk_dcad():
     Estimated runtime: ~2s per address × ~165 Dallas records ≈ 5-6 minutes.
     """
     print(f"\n{'=' * 70}")
-    print(f"  HERMES-REO PIPELINE — DCAD BULK CROSS-REFERENCE")
+    print("  HERMES-REO PIPELINE — DCAD BULK CROSS-REFERENCE")
     print(f"{'=' * 70}")
 
     # Load the lucid-noether dataset
     data_path = os.path.join(os.path.dirname(__file__), "data", "current_deals.json")
     if not os.path.exists(data_path):
         print(f"  No dataset found at {data_path}")
-        print(f"  Run find_deals.py first to generate current_deals.json")
+        print("  Run find_deals.py first to generate current_deals.json")
         return
 
     with open(data_path) as f:
@@ -412,7 +560,7 @@ def _run_bulk_dcad():
     # Run bulk cross-reference (limit 50 per run to avoid long sessions)
     updated = cross_reference_dcad_bulk(dallas_cprs, batch_limit=50)
     print(f"  CPRs updated with DCAD data: {updated}")
-    print(f"  Cache saved to: data/dcad_cache.json")
+    print("  Cache saved to: data/dcad_cache.json")
     print(f"\n{'=' * 70}")
     print(f"  DCAD BULK COMPLETE — {updated} enriched, {len(dallas_cprs) - updated} skipped/failed")
     print(f"{'=' * 70}")
@@ -422,10 +570,30 @@ def main():
     parser = argparse.ArgumentParser(description="HERMES-REO Pipeline Runner")
     parser.add_argument("--county", default="collin", choices=["collin", "dallas", "grayson"])
     parser.add_argument("--limit", type=int, default=1, help="Max records to process")
-    parser.add_argument("--fixture", action="store_true", help="Use fixture data (no network)")
+    parser.add_argument("--fixture", action="store_true", help="Use fixture data; writes data/fixtures/")
     parser.add_argument("--all-checks", action="store_true", help="Run all module self-checks first")
+    parser.add_argument("--checks-only", action="store_true",
+                        help="Run module self-checks and exit — zero network, no scraping")
+    parser.add_argument("--live", action="store_true",
+                        help="OPT-IN: enable live portal scraping (network). Required for the live branch.")
     parser.add_argument("--bulk-dcad", action="store_true", help="Run DCAD bulk cross-reference on all Dallas CPRs")
+    parser.add_argument("--allow-gate-fail-demo", action="store_true",
+                        help="Continue past GATE-LEGAL-LIEN fail/hitl (demo only — loud banner printed)")
     args = parser.parse_args()
+
+    mode_selected = args.live or args.fixture or args.bulk_dcad
+    checks_requested = args.all_checks or args.checks_only
+
+    # --checks-only always means checks-and-exit. When checks were requested but
+    # no data mode was selected, show the hint and stop after checks: ZERO network.
+    if args.checks_only or (checks_requested and not mode_selected):
+        if not mode_selected:
+            print(MODE_HINT)
+            print()
+        print("Running all module self-checks...")
+        ok = run_all_checks()
+        print("\n✓ All checks passed." if ok else "\n✗ Some checks failed — fix before proceeding.")
+        sys.exit(0 if ok else 1)
 
     if args.all_checks:
         print("Running all module self-checks...")
@@ -437,9 +605,13 @@ def main():
     if args.bulk_dcad:
         _run_bulk_dcad()
     elif args.fixture:
-        run_fixture_pipeline()
+        run_fixture_pipeline(allow_gate_fail_demo=args.allow_gate_fail_demo)
+    elif args.live:
+        run_live_pipeline(args.county, args.limit, allow_gate_fail_demo=args.allow_gate_fail_demo)
     else:
-        run_live_pipeline(args.county, args.limit)
+        # Bare invocation (or flags that select no mode): hint only, zero network.
+        print(MODE_HINT)
+        sys.exit(0)
 
 
 if __name__ == "__main__":

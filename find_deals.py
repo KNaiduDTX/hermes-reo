@@ -7,31 +7,34 @@ from __future__ import annotations
 import json
 import sys
 import os
-import re
 from datetime import datetime
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 from src.enrichment import enrich_from_raw_record, enrich_lead
 from src.adapters.collin_foreclosure import CollinForeclosureAdapter
-from src.adapters.dallas_foreclosure import DallasForeclosureAdapter
-from src.adapters.base import dedupe_leads, NormalizedLead
-from src.valuation import gate_val, GateValResult
-from src.underwriting import mao, flip_pnl
+from src.adapters.geojson_export import cpr_to_geojson
+from src.underwriting import mao
 from src.pricing import assign_blast_tier
-from src.compliance import gate_legal_lien, gate_legal_eligibility
-from src.reviewer import run_review
+from src.compliance import gate_legal_lien
 from src.synthesis import portfolio_stats, render_stats_report, get_city
-from src.adapters.geojson_export import export_geojson
-from src.cpr import CPR, ValuationObject, CompRecord, BlastTier, CPRColumn
-from src.legal_rules import get_redemption_class, get_redemption_days
+from src.cpr import CPR
+from src.io_utils import write_json, write_text  # atomic crash-safe writers (shared contract)
 
-LUCID_DATA = "/Users/knaidu/Documents/antigravity/lucid-noether/foreclosure_report.json"
+# F1: dataset location is overridable via env; default keeps the lucid-noether path.
+DEFAULT_LUCID_DATA = "/Users/knaidu/Documents/antigravity/lucid-noether/foreclosure_report.json"
+LUCID_DATA = os.environ.get("HERMES_LUCID_DATA") or DEFAULT_LUCID_DATA
 
 
 def load_prior_dataset():
     """Load the 335-record lucid-noether dataset and enrich each into a CPR."""
     print("\n[DATASET] Loading prior 335-record foreclosure dataset...")
+    if not os.path.exists(LUCID_DATA):
+        # F1: fail loudly but gracefully — no traceback.
+        print(f"  ✗ Dataset not found: {LUCID_DATA}")
+        print("    Fix: set HERMES_LUCID_DATA to your foreclosure_report.json path,")
+        print("    or restore the default lucid-noether checkout, then re-run.")
+        sys.exit(1)
     with open(LUCID_DATA) as f:
         records = json.load(f)
     print(f"  ✓ Loaded {len(records)} records ({sum(1 for r in records if r.get('county') == 'Collin')} Collin, {sum(1 for r in records if r.get('county') == 'Dallas')} Dallas)")
@@ -61,7 +64,9 @@ def scrape_live_collin(limit=5):
 def analyze_deal(cpr: CPR) -> dict:
     """Analyze a single deal — everything we know, what's blocked."""
     addr = cpr.situs_address
-    city = (cpr.city.value if hasattr(cpr, 'city') and cpr.city else "Unknown") if hasattr(cpr, 'city') else get_city(addr)
+    # F3: CPR may or may not carry a parsed city field — fall back to get_city().
+    city_pf = getattr(cpr, "city", None)
+    city = (city_pf.value if city_pf else None) or get_city(addr)
     sqft = cpr.improvement_sqft.value if cpr.improvement_sqft else None
     beds = cpr.beds.value if cpr.beds else None
     baths = cpr.baths.value if cpr.baths else None
@@ -217,9 +222,10 @@ def main():
         if d["cad_value"]:
             pps = f" (${d['price_per_sqft']:.0f}/sqft)" if d["price_per_sqft"] else ""
             print(f"     CAD: ${d['cad_value']:,.0f}{pps}" + (f" (2025: ${d['cad_value_2025']:,.0f}, change: {d['val_change_pct']:+.1f}%)" if d['val_change_pct'] is not None else ""))
-        if d["mortgage_debt"]:
-            print(f"     Debt: ${d['mortgage_debt']:,.0f} ({d['lender']}) | LTV: {d['ltv_pct']:.0f}%")
-            if d["equity_estimate"] is not None:
+        if d["mortgage_debt"] and d.get("ltv_pct") is not None:
+            lender_str = d.get("lender") or "Unknown"
+            print(f"     Debt: ${d['mortgage_debt']:,.0f} ({lender_str}) | LTV: {d['ltv_pct']:.0f}%")
+            if d.get("equity_estimate") is not None and d.get("equity_pct") is not None:
                 eq = d["equity_estimate"]
                 eq_str = f"${eq:,.0f}" if eq >= 0 else f"-${abs(eq):,.0f} (UNDERWATER)"
                 print(f"     Equity: {eq_str} ({d['equity_pct']:.0f}%)")
@@ -244,16 +250,14 @@ def main():
     output_dir = os.path.join(os.path.dirname(__file__), "data")
     os.makedirs(output_dir, exist_ok=True)
 
-    deals_path = os.path.join(output_dir, "current_deals.json")
-    with open(deals_path, "w") as f:
-        json.dump(deals, f, indent=2, default=str)
+    deals_path = write_json(os.path.join(output_dir, "current_deals.json"), deals, default=str)
 
-    stats_path = os.path.join(output_dir, "live_portfolio_stats.md")
-    with open(stats_path, "w") as f:
-        f.write(report)
+    stats_path = write_text(os.path.join(output_dir, "live_portfolio_stats.md"), report)
 
-    geojson_path = os.path.join(output_dir, "live_foreclosures.geojson")
-    n_features = export_geojson(cprs, geojson_path)
+    geojson_payload = cpr_to_geojson(cprs)
+    geojson_path = write_json(os.path.join(output_dir, "live_foreclosures.geojson"),
+                              geojson_payload, default=str)
+    n_features = len(geojson_payload["features"])
 
     print(f"\n  Saved: {deals_path} ({len(deals)} deals)")
     print(f"  Saved: {stats_path}")

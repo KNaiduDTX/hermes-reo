@@ -1,21 +1,53 @@
 #!/usr/bin/env python3
-# test_recalc.py — GATE-VAL + recalculation self-test
-"""Simulate AGENT-REV acceptance pass: change ARV, verify outputs recalculate."""
-from openpyxl import load_workbook
+# test_recalc.py — GATE-VAL + recalculation acceptance tests (pytest).
+"""AGENT-REV acceptance pass, converted to asserting tests.
 
-# Load the recalculated workbook
-wb = load_workbook("out/recalc/HERMES-REO_Model_Suite.xlsx", data_only=True)
+Verifies the LibreOffice-recalculated workbook (out/recalc/): headline outputs
+are computed values (not formula errors), GATE-VAL is live and passing, the
+S&U balance ties within tolerance, sensitivity grid computes, tax-deed
+redemption math is correct, and the measured named-range count is sane.
 
-results = {}
-all_pass = True
+Run:  .venv/bin/python -m pytest test_recalc.py     (or `make recalc`)
+Skips cleanly when the recalculated workbook is absent.
+"""
+from pathlib import Path
 
-print("=" * 70)
-print("  AGENT-REV ACCEPTANCE PASS — Recalculation Self-Test")
-print("=" * 70)
+import openpyxl
+import pytest
 
-# Test 1: All headline outputs are numbers (not #VALUE!, #NAME?, #REF!)
-print("\n[1] FORMULA-DRIVEN CHECK — all headline outputs are computed values")
-headline_cells = {
+REPO_ROOT = Path(__file__).resolve().parent
+RECALC_WB = REPO_ROOT / "out" / "recalc" / "HERMES-REO_Model_Suite.xlsx"
+BASE_WB = REPO_ROOT / "out" / "HERMES-REO_Model_Suite.xlsx"
+
+# The workbook's own S&U check uses ABS(uses - sources) < 1 ("PASS"/"FAIL").
+BALANCE_TOLERANCE = 1.0
+MIN_NAMED_RANGES = 85
+
+pytestmark = pytest.mark.recalc
+
+if not RECALC_WB.exists():
+    pytest.skip(
+        f"recalculated workbook absent: {RECALC_WB} — run 'make recalc' first",
+        allow_module_level=True,
+    )
+
+
+@pytest.fixture(scope="module")
+def wb():
+    return openpyxl.load_workbook(RECALC_WB, data_only=True)
+
+
+def _is_number(v) -> bool:
+    return isinstance(v, (int, float)) and not isinstance(v, bool)
+
+
+def _is_valid_text(v) -> bool:
+    # "PASS", "MARGINAL — review", "BLOCKED …" are valid verdicts; "#REF!"-style
+    # error literals are not.
+    return isinstance(v, str) and v.strip() != "" and not v.lstrip().startswith("#")
+
+
+HEADLINE_CELLS = {
     "Fix-and-Flip": [("B42", "Net profit"), ("B44", "ROI"), ("B51", "MAO")],
     "BRRRR": [("B16", "Refi loan"), ("B19", "Cash left in"), ("B20", "% recycled"), ("B14", "DSCR")],
     "Deal Screener": [("B10", "MAO"), ("B12", "1% rule"), ("B14", "Cap rate"), ("B17", "Verdict")],
@@ -28,94 +60,107 @@ headline_cells = {
     "Subject-To": [("B11", "Equity captured"), ("B15", "CoC")],
 }
 
-for tab, cells in headline_cells.items():
-    ws = wb[tab]
-    for cell, label in cells:
-        v = ws[cell].value
-        is_num = isinstance(v, (int, float))
-        is_text = isinstance(v, str)
-        # "BLOCKED", "FAIL", "GATE-VAL FAIL" are valid text verdicts, not errors
-        is_valid_text = is_text and v is not None and not str(v).startswith("#")
-        status = "✓" if is_num or is_valid_text else "✗"
-        if status == "✗":
-            all_pass = False
-        val_str = f"{v:,.2f}" if is_num else str(v)[:40] if v else "None"
-        print(f"  {status} {tab}!{cell} ({label}): {val_str}")
 
-# Test 2: GATE-VAL live logic
-print("\n[2] GATE-VAL LIVE LOGIC CHECK")
-ws_arv = wb["Comp & ARV"]
-verdict = ws_arv["B22"].value
-gate_pass = ws_arv["B23"].value
-print(f"  GATE-VAL verdict: {verdict}")
-print(f"  GATE-VAL pass: {gate_pass}")
-if "PASS" in str(verdict) and gate_pass:
-    print("  ✓ GATE-VAL is live and passing with valid comps")
-else:
-    print("  ✗ GATE-VAL not passing — check comp data")
-    all_pass = False
+def test_headline_outputs_are_formula_computed(wb):
+    """[1] Every headline cell holds a number or a valid text verdict — never an
+    Excel error literal (#VALUE!, #NAME?, #REF!), i.e. formulas actually recalculated."""
+    bad = []
+    for tab, cells in HEADLINE_CELLS.items():
+        ws = wb[tab]
+        for cell, label in cells:
+            v = ws[cell].value
+            if not (_is_number(v) or _is_valid_text(v)):
+                bad.append(f"{tab}!{cell} ({label}) = {v!r}")
+            elif _is_number(v):
+                # numeric cells must be genuinely numeric-typed, not numeric strings
+                assert isinstance(v, (int, float))
+    assert not bad, "formula-error or empty headline cells:\n  " + "\n  ".join(bad)
 
-# Test 3: S&U balance check
-print("\n[3] BALANCE CHECKS")
-ws_checks = wb["Checks"]
-su_check = ws_checks["B13"].value
-print(f"  S&U ties: {su_check}")
 
-# Test 4: Sensitivity grid computes
-print("\n[4] SENSITIVITY GRID")
-ws_sens = wb["Sensitivity"]
-center = ws_sens.cell(row=8, column=3).value
-top_left = ws_sens.cell(row=6, column=2).value
-bottom_right = ws_sens.cell(row=10, column=5).value
-print(f"  Center (base): {center:,.2f}" if isinstance(center, (int, float)) else f"  Center: {center}")
-print(f"  Top-left stress: {top_left:,.2f}" if isinstance(top_left, (int, float)) else f"  Top-left: {top_left}")
-print(f"  Bottom-right: {bottom_right:,.2f}" if isinstance(bottom_right, (int, float)) else f"  Bottom-right: {bottom_right}")
-if isinstance(center, (int, float)) and isinstance(top_left, (int, float)):
-    print("  ✓ Sensitivity grid is formula-driven and computes")
+def test_gate_val_verdict_is_live_and_passing(wb):
+    """[2] GATE-VAL verdict equality: 'PASS' with a True pass flag."""
+    ws = wb["Comp & ARV"]
+    assert ws["B22"].value == "PASS", f"GATE-VAL verdict = {ws['B22'].value!r}"
+    assert ws["B23"].value is True, "GATE-VAL pass flag is not True"
 
-# Test 5: Deal Screener verdict
-print("\n[5] DEAL SCREENER VERDICT")
-ws_screen = wb["Deal Screener"]
-verdict = ws_screen["B17"].value
-constraint = ws_screen["B18"].value
-print(f"  Verdict: {verdict}")
-print(f"  Binding constraint: {constraint}")
 
-# Test 6: Tax-Deed redemption math
-print("\n[6] TAX-DEED REDEMPTION MATH")
-ws_td = wb["Tax-Deed"]
-premium = ws_td["B14"].value
-total = ws_td["B17"].value
-ann_yield = ws_td["B18"].value
-print(f"  Premium yr1 (25% of $102k): {premium:,.0f}" if isinstance(premium, (int, float)) else f"  Premium: {premium}")
-print(f"  Guaranteed return: {total:,.0f}" if isinstance(total, (int, float)) else f"  Return: {total}")
-print(f"  Annualized yield: {ann_yield:.1%}" if isinstance(ann_yield, (int, float)) else f"  Yield: {ann_yield}")
-if isinstance(premium, (int, float)) and premium == 25500:
-    print("  ✓ Redemption math correct ($102k × 25% = $25,500)")
+def test_sources_and_uses_balance_within_tolerance(wb):
+    """[3] S&U ties: |total uses − (debt + equity)| <= $1 and the workbook's own
+    balance check reports PASS."""
+    su_check = wb["Checks"]["B13"].value
+    assert isinstance(su_check, str) and su_check.startswith("PASS"), \
+        f"Checks!B13 S&U tie = {su_check!r}"
 
-# Test 7: BRRRR capital recycle
-print("\n[7] BRRRR CAPITAL RECYCLE")
-ws_brrrr = wb["BRRRR"]
-refi = ws_brrrr["B16"].value
-cash_left = ws_brrrr["B19"].value
-recycled = ws_brrrr["B20"].value
-dscr = ws_brrrr["B14"].value
-verdict = ws_brrrr["B28"].value
-print(f"  Refi loan: {refi:,.0f}" if isinstance(refi, (int, float)) else f"  Refi: {refi}")
-print(f"  Cash left in: {cash_left:,.0f}" if isinstance(cash_left, (int, float)) else f"  Cash left: {cash_left}")
-print(f"  % recycled: {recycled:.1%}" if isinstance(recycled, (int, float)) else f"  Recycled: {recycled}")
-print(f"  DSCR at refi: {dscr:.2f}" if isinstance(dscr, (int, float)) else f"  DSCR: {dscr}")
-print(f"  Verdict: {verdict}")
+    ff = wb["Fix-and-Flip"]
+    uses = ff["B10"].value
+    debt = ff["B13"].value
+    equity = ff["B14"].value
+    for name, v in (("uses", uses), ("debt", debt), ("equity", equity)):
+        assert _is_number(v), f"Fix-and-Flip {name} is not numeric: {v!r}"
+    assert abs(uses - (debt + equity)) <= BALANCE_TOLERANCE, (
+        f"S&U imbalance ${uses - (debt + equity):,.2f} exceeds ${BALANCE_TOLERANCE:.0f}"
+    )
 
-# Summary
-print("\n" + "=" * 70)
-print("  ACCEPTANCE SUMMARY")
-print("=" * 70)
-print(f"  Self-test: {'PASS' if all_pass else 'FAIL'}")
-print(f"  Tabs: {len(wb.sheetnames)}")
-print(f"  Named ranges: 91")
-print(f"  All 8 deal types: computed")
-print(f"  GATE-VAL: live, passing with sample MLS comps")
-print(f"  Sensitivity grid: formula-driven, 5×4 grid")
-print(f"  Balance checks: S&U ties verified")
-print(f"  Recalc self-test: PASS — all headline outputs are formula results")
+
+def test_sensitivity_grid_computes(wb):
+    """[4] Sensitivity grid corners are formula-driven numbers."""
+    ws = wb["Sensitivity"]
+    center = ws.cell(row=8, column=3).value      # base case
+    top_left = ws.cell(row=6, column=2).value    # stress corner
+    bottom_right = ws.cell(row=10, column=5).value
+    for label, v in (("center C8", center), ("top-left B6", top_left),
+                     ("bottom-right E10", bottom_right)):
+        assert _is_number(v), f"Sensitivity {label} is not a computed number: {v!r}"
+
+
+def test_deal_screener_verdict_present(wb):
+    """[5] Deal Screener emits a real verdict and binding constraint."""
+    ws = wb["Deal Screener"]
+    verdict = ws["B17"].value
+    constraint = ws["B18"].value
+    assert _is_valid_text(verdict), f"Deal Screener B17 verdict = {verdict!r}"
+    assert _is_valid_text(constraint), f"Deal Screener B18 constraint = {constraint!r}"
+
+
+def test_tax_deed_redemption_math(wb):
+    """[6] Redemption math: premium yr1 ≈ $25,500 ($102k × 25%), return + yield numeric."""
+    ws = wb["Tax-Deed"]
+    premium = ws["B14"].value
+    guaranteed_return = ws["B17"].value
+    ann_yield = ws["B18"].value
+    assert _is_number(premium), f"Premium yr1 not numeric: {premium!r}"
+    assert premium == pytest.approx(25_500, abs=1.0), \
+        f"Redemption premium {premium!r} ≠ $102k × 25% = $25,500"
+    assert _is_number(guaranteed_return) and guaranteed_return > 0, \
+        f"Guaranteed return not a positive number: {guaranteed_return!r}"
+    assert _is_number(ann_yield) and 0 < ann_yield < 10, \
+        f"Annualized yield implausible: {ann_yield!r}"
+
+
+def test_brrrr_capital_recycle_numeric(wb):
+    """[7] BRRRR refi stack computes numerically with a verdict string."""
+    ws = wb["BRRRR"]
+    refi = ws["B16"].value
+    cash_left = ws["B19"].value
+    recycled = ws["B20"].value
+    dscr = ws["B14"].value
+    verdict = ws["B28"].value
+    for label, v in (("refi loan B16", refi), ("cash left B19", cash_left),
+                     ("% recycled B20", recycled), ("DSCR B14", dscr)):
+        assert _is_number(v), f"BRRRR {label} is not numeric: {v!r}"
+    assert _is_valid_text(verdict), f"BRRRR B28 verdict = {verdict!r}"
+
+
+def test_named_ranges_measured():
+    """Measured named-range count on the built workbook is at least 85."""
+    if not BASE_WB.exists():
+        pytest.skip(f"built workbook absent: {BASE_WB} — run 'make build' first")
+    wbn = openpyxl.load_workbook(BASE_WB)
+    n_names = len(list(wbn.defined_names))
+    assert n_names >= MIN_NAMED_RANGES, (
+        f"only {n_names} named ranges (expected >= {MIN_NAMED_RANGES})"
+    )
+
+
+if __name__ == "__main__":
+    raise SystemExit(pytest.main([__file__]))
