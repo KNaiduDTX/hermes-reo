@@ -8,6 +8,7 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import Optional
 from .legal_rules import DealType, RedemptionClass, compute_redemption_yield
+from . import policy
 
 
 @dataclass
@@ -18,7 +19,7 @@ class UnderwriteResult:
     arv: float = 0.0
     purchase_price: float = 0.0
     rehab: float = 0.0
-    rehab_contingency_pct: float = 0.20  # 20% contingency
+    rehab_contingency_pct: float = policy.REHAB_CONTINGENCY_PCT  # 20% contingency
     holding_costs: float = 0.0
     financing_costs: float = 0.0
     closing_costs_buy: float = 0.0
@@ -38,7 +39,7 @@ class UnderwriteResult:
     line_items: dict = field(default_factory=dict)
 
 
-def mao(arv: float, rehab: float, factor: float = 0.70) -> float:
+def mao(arv: float, rehab: float, factor: float = policy.MAO_FACTOR_DEFAULT) -> float:
     """70% rule: MAO = (ARV × factor) − rehab."""
     return (arv * factor) - rehab
 
@@ -55,7 +56,7 @@ def wholesale_mao(arv: float, rehab: float, assignment_fee: float,
 def flip_pnl(arv: float, purchase: float, rehab: float,
              holding: float = 0.0, financing: float = 0.0,
              closing_buy: float = 0.0, closing_sell: float = 0.0,
-             contingency_pct: float = 0.20,
+             contingency_pct: float = policy.REHAB_CONTINGENCY_PCT,
              deal_type: Optional[str] = None) -> UnderwriteResult:
     """Fix-and-flip P&L.
 
@@ -90,7 +91,7 @@ def brrrr_recycle(arv: float, purchase: float, rehab: float,
                   refi_ltv: float = 0.75, refi_appraisal: float = 0.0,
                   holding: float = 0.0, financing: float = 0.0,
                   closing_buy: float = 0.0, closing_sell: float = 0.0,
-                  contingency_pct: float = 0.20,
+                  contingency_pct: float = policy.REHAB_CONTINGENCY_PCT,
                   deal_type: Optional[str] = None) -> UnderwriteResult:
     """BRRRR: buy like a flip, hold like a rental, refi to recycle capital.
 
@@ -251,7 +252,7 @@ def route_underwrite(cpr, arv: float, rehab: float, deal_type: str = "DT-AUCTION
                         holding=kwargs.get("holding", 0),
                         financing=kwargs.get("financing", 0),
                         closing_buy=kwargs.get("closing_buy", 0),
-                        closing_sell=kwargs.get("closing_sell", arv * 0.08),
+                        closing_sell=kwargs.get("closing_sell", arv * policy.CLOSING_SELL_PCT),
                         deal_type=dt)
     elif dt == "DT-WHOLESALE":
         return flip_pnl(arv, _require_purchase(kwargs), rehab,

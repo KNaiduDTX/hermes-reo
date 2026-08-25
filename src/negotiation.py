@@ -12,6 +12,7 @@ from .cpr import CPR, CPRColumn, BlastTier, pv_value
 from .compliance import gate_legal_wholesale
 from .pricing import PricingResult
 from .legal_rules import DealType
+from . import policy
 
 
 # --- Seller postures keyed to distress type ---
@@ -110,10 +111,12 @@ def generate_offer(cpr: CPR, pricing: PricingResult) -> OfferPackage:
 
     # Base offer terms
     offer_price = ladder.get("opening", 0)
-    earnest_money = max(offer_price * 0.01, 1_000)  # 1% or $1K min
-    option_fee = max(offer_price * 0.001, 200)  # ~0.1% or $200 min
-    option_period = 7 if deal_type != "DT-SHORT" else 14  # short sales need more time
-    closing_days = 7 if deal_type != "DT-SHORT" else 45
+    earnest_money = max(offer_price * policy.EARNEST_MONEY_PCT, policy.EARNEST_MONEY_MIN)  # 1% or $1K min
+    option_fee = max(offer_price * policy.OPTION_FEE_PCT, policy.OPTION_FEE_MIN)  # ~0.1% or $200 min
+    option_period = (policy.OPTION_PERIOD_DAYS if deal_type != "DT-SHORT"
+                     else policy.OPTION_PERIOD_DAYS_EXTENDED)  # short sales need more time
+    closing_days = (policy.CLOSING_TIMELINE_DAYS if deal_type != "DT-SHORT"
+                    else policy.CLOSING_TIMELINE_DAYS_MAX)
     is_cash = deal_type in ("DT-AUCTION", "DT-PREFORE", "DT-REO")
 
     # Wholesale-specific — GATE-LEGAL-WHOLESALE is the single compliance

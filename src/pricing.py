@@ -12,6 +12,7 @@ from dataclasses import dataclass, field
 from typing import Optional
 from .cpr import CPR, CPRColumn, BlastTier, LienRecord
 from .underwriting import mao, wholesale_mao
+from . import policy
 
 
 # Pencil-status states for PricingResult.pencil_status (AUDIT F12: the legacy
@@ -109,8 +110,9 @@ def sensitivity_grid(arv: float, rehab: float, purchase: float,
                      arv_deltas: list[float] = None,
                      rehab_deltas: list[float] = None,
                      holding: float = 0, financing: float = 0,
-                     closing_buy: float = 0, closing_sell_pct: float = 0.08,
-                     contingency_pct: float = 0.20) -> list[SensitivityCell]:
+                     closing_buy: float = 0,
+                     closing_sell_pct: float = policy.CLOSING_SELL_PCT,
+                     contingency_pct: float = policy.REHAB_CONTINGENCY_PCT) -> list[SensitivityCell]:
     """2D grid over ARV (±) × rehab (±) showing profit/margin.
 
     classify_pencil() flags deals that only pencil at optimistic ARV or
@@ -178,16 +180,16 @@ def assign_blast_tier(capital_at_risk: float, deal_type: str = "DT-AUCTION") -> 
     """
     if capital_at_risk <= 0:
         return BlastTier.T0
-    elif capital_at_risk <= 25_000:
+    elif capital_at_risk <= policy.BLAST_TIER_T2_MAX:
         return BlastTier.T1
-    elif capital_at_risk <= 150_000:
+    elif capital_at_risk <= policy.BLAST_TIER_T3_MAX:
         return BlastTier.T2
     else:
         return BlastTier.T3
 
 
 def price_deal(cpr: CPR, arv: float, rehab: float, deal_type: str = "DT-AUCTION",
-               factor: float = 0.70, cash_available: float = float("inf"),
+               factor: float = policy.MAO_FACTOR_DEFAULT, cash_available: float = float("inf"),
                seller_posture: str = "standard",
                capital_at_risk: float = 0) -> PricingResult:
     """Full pricing: MAO, bid ceiling, offer ladder, sensitivity, tier.

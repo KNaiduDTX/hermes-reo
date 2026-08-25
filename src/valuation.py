@@ -16,23 +16,25 @@ from .legal_rules import (
     is_comp_source_approved, is_comp_source_rejected, get_comp_rigor_tier,
     RedemptionClass,
 )
+from . import policy
 
 
-# Confidence floors by blast tier
+# Confidence floors by blast tier — wired to src.policy scalars
+# (single source of truth; values unchanged from the audited defaults)
 CONFIDENCE_FLOORS = {
-    BlastTier.T0: 0.50,  # screen only
-    BlastTier.T1: 0.60,  # small deal
-    BlastTier.T2: 0.75,  # mid deal — agent-MLS or BPO required
-    BlastTier.T3: 0.85,  # large deal — appraiser-grade required
+    BlastTier.T0: policy.CONFIDENCE_FLOOR_T0,  # screen only
+    BlastTier.T1: policy.CONFIDENCE_FLOOR_T1,  # small deal
+    BlastTier.T2: policy.CONFIDENCE_FLOOR_T2,  # mid deal — agent-MLS or BPO required
+    BlastTier.T3: policy.CONFIDENCE_FLOOR_T3,  # large deal — appraiser-grade required
 }
 
 # Minimum comp count for a valid comp set (applied AFTER filtering)
-MIN_COMPS = 3
+MIN_COMPS = policy.MIN_COMPS
 
 # Max distance (miles) and age (days) for usable comps. Both are enforced:
 # failing comps are dropped before scoring and before the ARV median (H2).
-MAX_COMP_DISTANCE_MI = 0.5
-MAX_COMP_AGE_DAYS = 180
+MAX_COMP_DISTANCE_MI = policy.MAX_COMP_DISTANCE_MI
+MAX_COMP_AGE_DAYS = policy.MAX_COMP_AGE_DAYS
 
 # Recency credit bands relative to MAX_COMP_AGE_DAYS (audit H2):
 RECENCY_FULL_POINTS_DAYS = 90   # age <= this: full recency credit
