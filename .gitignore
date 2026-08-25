@@ -12,7 +12,6 @@ __pycache__/
 # Derived data & outputs (contain scraped public-record PII; never commit)
 data/
 out/
-static/
 
 # OS noise
 .DS_Store

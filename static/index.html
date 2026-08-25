@@ -1,0 +1,747 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>HERMES-REO · Portfolio Dashboard</title>
+<!-- Leaflet via CDN per DASHBOARD_PLAN.md §0 (map degrades gracefully offline) -->
+<link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css">
+<script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js" defer></script>
+<style>
+  :root{
+    --bg:#0b0e13; --bg2:#0e1219; --panel:#12161d; --panel2:#171c25;
+    --border:#232a35; --border2:#2d3644;
+    --text:#dbe4ee; --muted:#8b98a9; --faint:#5c6878;
+    --accent:#37b58c; --accent-dim:#1f6f56;
+    --blue:#4aa3df; --amber:#e0a83e; --red:#e05c5c; --violet:#a78bfa;
+    --mono:"SF Mono",ui-monospace,Menlo,Consolas,monospace;
+  }
+  *{box-sizing:border-box}
+  html,body{margin:0;padding:0}
+  body{
+    background:var(--bg); color:var(--text);
+    font:14px/1.45 -apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,Helvetica,Arial,sans-serif;
+    min-height:100vh;
+  }
+  a{color:var(--blue);text-decoration:none}
+
+  /* ---------- header / nav ---------- */
+  header{
+    display:flex;align-items:center;gap:18px;flex-wrap:wrap;
+    padding:10px 20px;background:var(--bg2);border-bottom:1px solid var(--border);
+    position:sticky;top:0;z-index:1200;
+  }
+  .brand{font-weight:700;font-size:15px;letter-spacing:.06em}
+  .brand em{color:var(--accent);font-style:normal}
+  .brand small{color:var(--muted);font-weight:400;margin-left:8px;letter-spacing:0}
+  .api-status{display:flex;align-items:center;gap:6px;color:var(--muted);font-size:12px}
+  .dot{width:8px;height:8px;border-radius:50%;background:var(--red)}
+  .dot.ok{background:var(--accent);box-shadow:0 0 6px rgba(55,181,140,.8)}
+  nav{display:flex;gap:4px;margin-left:auto}
+  nav button{
+    background:none;border:1px solid transparent;color:var(--muted);
+    padding:6px 14px;border-radius:6px;font-size:13px;cursor:pointer;
+  }
+  nav button:hover{color:var(--text);background:var(--panel2)}
+  nav button.active{color:var(--accent);border-color:var(--border2);background:var(--panel)}
+
+  main{padding:18px 20px 60px}
+  section.view{display:none}
+  section.view.active{display:block}
+  .view-head{display:flex;align-items:baseline;gap:12px;margin:4px 0 14px}
+  .view-head h1{font-size:17px;margin:0;font-weight:650}
+  .view-head .sub{color:var(--muted);font-size:12.5px}
+  .spacer{flex:1}
+
+  /* ---------- cards / KPIs ---------- */
+  .kpi-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(215px,1fr));gap:12px;margin-bottom:16px}
+  .card{
+    background:var(--panel);border:1px solid var(--border);border-radius:10px;padding:14px 16px;
+  }
+  .kpi .label{color:var(--muted);font-size:11px;text-transform:uppercase;letter-spacing:.09em}
+  .kpi .value{font-size:26px;font-weight:700;margin-top:6px;font-family:var(--mono);letter-spacing:-.01em}
+  .kpi .detail{color:var(--faint);font-size:11.5px;margin-top:4px}
+  .kpi.accent .value{color:var(--accent)}
+  .county-chips{display:flex;flex-direction:column;gap:7px;margin-top:8px}
+  .chip-row{display:flex;align-items:center;gap:10px}
+  .chip-name{width:86px;font-size:12.5px;text-transform:capitalize;color:var(--text)}
+  .chip-bar{flex:1;height:10px;background:var(--panel2);border-radius:5px;overflow:hidden}
+  .chip-bar>i{display:block;height:100%;background:linear-gradient(90deg,var(--accent-dim),var(--accent))}
+  .chip-n{font-family:var(--mono);font-size:12px;color:var(--muted);min-width:64px;text-align:right}
+
+  .grid-2{display:grid;grid-template-columns:1fr 1fr;gap:12px}
+  .grid-3{display:grid;grid-template-columns:repeat(3,1fr);gap:12px}
+  @media(max-width:1050px){.grid-2,.grid-3{grid-template-columns:1fr}}
+  h2.panel-title{font-size:12px;text-transform:uppercase;letter-spacing:.08em;color:var(--muted);margin:0 0 10px}
+
+  /* bars */
+  .hbar{display:flex;align-items:center;gap:8px;margin:5px 0;font-size:12.5px}
+  .hbar .hname{width:130px;color:var(--text);white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+  .hbar .htrack{flex:1;height:12px;background:var(--panel2);border-radius:6px;overflow:hidden}
+  .hbar .htrack>i{display:block;height:100%;background:var(--blue);opacity:.85}
+  .hbar.tier .htrack>i{background:var(--violet)}
+  .hbar .hn{font-family:var(--mono);color:var(--muted);min-width:38px;text-align:right}
+  table.mini{width:100%;border-collapse:collapse;font-size:12.5px}
+  table.mini th{color:var(--faint);text-align:left;font-weight:500;padding:4px 6px;border-bottom:1px solid var(--border)}
+  table.mini td{padding:4px 6px;border-bottom:1px solid var(--border)}
+  table.mini td.n{text-align:right;font-family:var(--mono);color:var(--muted)}
+
+  /* gate summary chips */
+  .gate-strip{display:flex;gap:8px;flex-wrap:wrap}
+  .gchip{border-radius:6px;padding:4px 10px;font-size:12px;border:1px solid var(--border2);background:var(--panel2);color:var(--muted)}
+  .gchip b{font-family:var(--mono);color:var(--text)}
+  .gchip.pass b{color:var(--accent)} .gchip.fail b{color:var(--red)} .gchip.warn b{color:var(--amber)}
+
+  /* ---------- filters + table ---------- */
+  .filter-bar{
+    display:flex;gap:8px;flex-wrap:wrap;align-items:center;
+    background:var(--panel);border:1px solid var(--border);border-radius:10px;padding:10px 12px;margin-bottom:12px;
+  }
+  .filter-bar input,.filter-bar select{
+    background:var(--bg2);border:1px solid var(--border2);color:var(--text);
+    border-radius:6px;padding:6px 9px;font-size:13px;outline:none;
+  }
+  .filter-bar input:focus,.filter-bar select:focus{border-color:var(--accent-dim)}
+  .filter-bar input[type=search]{min-width:230px}
+  .filter-bar input.num{width:110px;font-family:var(--mono)}
+  .filter-bar label{color:var(--faint);font-size:11.5px;text-transform:uppercase;letter-spacing:.05em}
+  .btn{
+    background:var(--panel2);border:1px solid var(--border2);color:var(--text);
+    border-radius:6px;padding:6px 12px;font-size:12.5px;cursor:pointer;
+  }
+  .btn:hover{border-color:var(--accent-dim);color:var(--accent)}
+  .btn.primary{background:var(--accent-dim);border-color:var(--accent-dim);color:#eafff6}
+  .btn:disabled{opacity:.4;cursor:default}
+
+  .table-wrap{overflow:auto;max-height:calc(100vh - 260px);border:1px solid var(--border);border-radius:10px;background:var(--panel)}
+  table.deals{border-collapse:separate;border-spacing:0;width:100%;font-size:12.5px;white-space:nowrap}
+  table.deals thead th{
+    position:sticky;top:0;z-index:5;background:var(--panel2);color:var(--muted);
+    text-align:left;font-weight:600;font-size:11px;text-transform:uppercase;letter-spacing:.05em;
+    padding:8px 10px;border-bottom:1px solid var(--border2);cursor:pointer;user-select:none;
+  }
+  table.deals thead th:hover{color:var(--accent)}
+  table.deals thead th.sorted{color:var(--accent)}
+  table.deals tbody td{padding:6px 10px;border-bottom:1px solid var(--border);vertical-align:middle}
+  table.deals tbody tr:hover td{background:rgba(74,163,223,.05)}
+  td.num,th.num{text-align:right;font-family:var(--mono);font-size:12px}
+  td.dim,.dim{color:var(--muted)}
+  .addr{max-width:280px;overflow:hidden;text-overflow:ellipsis;color:var(--text);font-weight:500}
+  .badge{display:inline-block;border-radius:5px;padding:1px 7px;font-size:10.5px;font-weight:600;letter-spacing:.03em;text-transform:uppercase;border:1px solid}
+  .badge.pass{color:var(--accent);border-color:var(--accent-dim);background:rgba(55,181,140,.08)}
+  .badge.fail{color:var(--red);border-color:#6d3030;background:rgba(224,92,92,.08)}
+  .badge.rej{color:var(--amber);border-color:#6d5426;background:rgba(224,168,62,.08)}
+  .badge.neutral{color:var(--muted);border-color:var(--border2);background:var(--panel2)}
+  .badge.t0{color:#9fb3c8;border-color:#33475c;background:rgba(74,163,223,.07)}
+  .badge.t1{color:var(--blue);border-color:#2b5779;background:rgba(74,163,223,.1)}
+  .badge.t2{color:var(--amber);border-color:#6d5426;background:rgba(224,168,62,.1)}
+  .badge.t3{color:var(--red);border-color:#6d3030;background:rgba(224,92,92,.1)}
+
+  .table-foot{display:flex;align-items:center;gap:10px;margin-top:10px;color:var(--muted);font-size:12.5px}
+  .empty-msg{padding:30px;text-align:center;color:var(--faint)}
+
+  /* ---------- map ---------- */
+  #map{height:calc(100vh - 210px);min-height:420px;border-radius:10px;border:1px solid var(--border);background:var(--bg2);z-index:1}
+  .map-legend{
+    position:absolute;bottom:18px;left:12px;z-index:800;background:rgba(14,18,25,.92);
+    border:1px solid var(--border2);border-radius:8px;padding:9px 12px;font-size:12px;color:var(--muted);
+  }
+  .map-legend .li{display:flex;align-items:center;gap:7px;margin:3px 0}
+  .swatch{width:11px;height:11px;border-radius:50%;display:inline-block}
+  .map-offline{padding:40px;text-align:center;color:var(--amber)}
+
+  /* ---------- stats ---------- */
+  .stats-body{background:var(--panel);border:1px solid var(--border);border-radius:10px;padding:20px 24px;max-width:900px}
+  .stats-body h1{font-size:17px;color:var(--accent);margin:14px 0 8px}
+  .stats-body h1:first-child{margin-top:0}
+  .stats-body h2{font-size:13px;text-transform:uppercase;letter-spacing:.07em;color:var(--blue);margin:16px 0 6px}
+  .stats-body p{margin:4px 0;color:var(--text)}
+  .stats-body ul{margin:4px 0;padding-left:18px}
+  .stats-body li{margin:2.5px 0}
+  .stats-body strong{color:var(--text)}
+  .stats-body table{border-collapse:collapse;margin:6px 0;font-size:12.5px}
+  .stats-body th,.stats-body td{border:1px solid var(--border2);padding:4px 10px;text-align:left}
+  .stats-body th{color:var(--muted);background:var(--panel2)}
+  .meta-line{color:var(--faint);font-size:11.5px;margin-top:10px}
+
+  .error-banner{
+    background:rgba(224,92,92,.09);border:1px solid #6d3030;color:#f0b9b9;
+    border-radius:8px;padding:10px 14px;margin-bottom:12px;font-size:13px;display:none;
+  }
+  footer{position:fixed;bottom:0;left:0;right:0;padding:6px 20px;background:var(--bg2);
+    border-top:1px solid var(--border);color:var(--faint);font-size:11px;display:flex;gap:16px;z-index:1200}
+</style>
+</head>
+<body>
+
+<header>
+  <div class="brand">HERMES<em>-REO</em> <small>Portfolio Dashboard</small></div>
+  <div class="api-status"><span class="dot" id="statusDot"></span><span id="statusText">connecting…</span></div>
+  <nav>
+    <button data-view="overview" class="active">Overview</button>
+    <button data-view="deals">Deals</button>
+    <button data-view="map">Map</button>
+    <button data-view="stats">Stats</button>
+  </nav>
+</header>
+
+<main>
+  <!-- ============ OVERVIEW ============ -->
+  <section class="view active" id="view-overview">
+    <div class="view-head">
+      <h1>Portfolio Overview</h1><span class="sub" id="ovSub"></span>
+      <span class="spacer"></span>
+      <button class="btn" id="refreshAllBtn">↻ Refresh data</button>
+    </div>
+    <div class="error-banner" id="ovError"></div>
+
+    <div class="kpi-grid">
+      <div class="card kpi"><div class="label">Total Deals</div>
+        <div class="value" id="kpiTotal">—</div><div class="detail" id="kpiTotalDetail">current_deals.json</div></div>
+      <div class="card kpi accent"><div class="label">Total Debt Exposure</div>
+        <div class="value" id="kpiDebt">—</div><div class="detail" id="kpiDebtDetail">sum of mortgage debt</div></div>
+      <div class="card kpi"><div class="label">Geocoded</div>
+        <div class="value" id="kpiGeo">—</div><div class="detail" id="kpiGeoDetail">lat/lng coverage</div></div>
+      <div class="card kpi"><div class="label">Counties</div>
+        <div class="county-chips" id="kpiCounties"><span class="detail">loading…</span></div></div>
+    </div>
+
+    <div class="grid-3">
+      <div class="card"><h2 class="panel-title">Blast Tier Distribution</h2><div id="tierBars"></div></div>
+      <div class="card"><h2 class="panel-title">Top Cities</h2><div id="cityBars"></div></div>
+      <div class="card">
+        <h2 class="panel-title">Gate Snapshot</h2>
+        <div class="gate-strip" id="gateStrip"></div>
+        <h2 class="panel-title" style="margin-top:14px">Top Lenders</h2>
+        <table class="mini" id="lenderTable"></table>
+      </div>
+    </div>
+  </section>
+
+  <!-- ============ DEALS ============ -->
+  <section class="view" id="view-deals">
+    <div class="view-head"><h1>Deal Pipeline</h1><span class="sub" id="dealsSub"></span></div>
+    <div class="error-banner" id="dealsError"></div>
+    <div class="filter-bar">
+      <input type="search" id="fSearch" placeholder="Search address / owner / lender / parcel…">
+      <label>County</label><select id="fCounty"><option value="">All</option></select>
+      <label>City</label><select id="fCity"><option value="">All</option></select>
+      <label>Tier</label><select id="fTier"><option value="">All</option></select>
+      <label>Debt $ ≥</label><input type="number" class="num" id="fDebtMin" placeholder="min" min="0">
+      <label>≤</label><input type="number" class="num" id="fDebtMax" placeholder="max" min="0">
+      <button class="btn" id="clearFilters">Clear</button>
+    </div>
+    <div class="table-wrap">
+      <table class="deals" id="dealsTable">
+        <thead><tr id="dealsHeadRow"></tr></thead>
+        <tbody id="dealsBody"></tbody>
+      </table>
+    </div>
+    <div class="table-foot">
+      <button class="btn" id="pgPrev">‹ Prev</button>
+      <span id="pgLabel"></span>
+      <button class="btn" id="pgNext">Next ›</button>
+      <span class="spacer"></span>
+      <span id="matchLabel"></span>
+    </div>
+  </section>
+
+  <!-- ============ MAP ============ -->
+  <section class="view" id="view-map">
+    <div class="view-head"><h1>Map View</h1>
+      <span class="sub">live_foreclosures.geojson · click a marker for deal facts</span>
+      <span class="spacer"></span>
+      <label style="color:var(--faint);font-size:11.5px;text-transform:uppercase">County</label>
+      <select id="mCounty" style="background:var(--bg2);border:1px solid var(--border2);color:var(--text);border-radius:6px;padding:5px 8px"><option value="">All</option></select>
+      <label style="color:var(--faint);font-size:11.5px;text-transform:uppercase">Tier</label>
+      <select id="mTier" style="background:var(--bg2);border:1px solid var(--border2);color:var(--text);border-radius:6px;padding:5px 8px"><option value="">All</option></select>
+    </div>
+    <div class="error-banner" id="mapError"></div>
+    <div style="position:relative">
+      <div id="map"></div>
+      <div class="map-legend" id="mapLegend">
+        <div class="li"><span class="swatch" style="background:#95a5a6"></span>Standard</div>
+        <div class="li"><span class="swatch" style="background:#2ecc71"></span>High-Equity</div>
+        <div class="li"><span class="swatch" style="background:#e67e22"></span>Distressed</div>
+        <div class="li" style="color:var(--faint)">marker size = blast tier (T3 largest)</div>
+      </div>
+    </div>
+  </section>
+
+  <!-- ============ STATS ============ -->
+  <section class="view" id="view-stats">
+    <div class="view-head"><h1>Portfolio Statistics</h1>
+      <span class="sub">src.synthesis.portfolio_stats over enriched CPRs</span>
+      <span class="spacer"></span>
+      <button class="btn primary" id="statsRefresh">↻ Recompute stats</button>
+    </div>
+    <div class="error-banner" id="statsError"></div>
+    <div class="stats-body" id="statsBody"><p class="dim">Loading…</p></div>
+  </section>
+</main>
+
+<footer>
+  <span>read-only · local pipeline data</span>
+  <span>/api/deals · /api/geojson · /api/stats · /api/summary</span>
+  <span class="spacer"></span>
+  <span id="footStamp"></span>
+</footer>
+
+<script>
+'use strict';
+/* =========================================================================
+ * HERMES-REO dashboard — plain ES6, no build tooling (DASHBOARD_PLAN.md §0)
+ * ========================================================================= */
+
+const $ = (id) => document.getElementById(id);
+const esc = (s) => String(s == null ? '' : s)
+  .replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;');
+
+function num(v){                       // tolerant numeric coercion
+  if (typeof v === 'number') return isFinite(v) ? v : null;
+  if (typeof v === 'string' && v.trim() !== ''){
+    const n = parseFloat(v.replace(/[$,]/g,''));
+    return isNaN(n) ? null : n;
+  }
+  return null;
+}
+function fmtMoney(v, compact){
+  if (v == null) return '—';
+  if (compact){
+    if (Math.abs(v) >= 1e9) return '$' + (v/1e9).toFixed(2) + 'B';
+    if (Math.abs(v) >= 1e6) return '$' + (v/1e6).toFixed(2) + 'M';
+    if (Math.abs(v) >= 1e3) return '$' + (v/1e3).toFixed(0) + 'K';
+  }
+  return '$' + Math.round(v).toLocaleString('en-US');
+}
+function shortWord(s, n){ return String(s || '').trim().split(/\s+/)[0] || '—'; }
+
+/* The geojson stores coordinates as *stringified* ProvenanceField reprs
+   ("ProvenanceField(value=-96.79, source=…)") rather than raw numbers —
+   parse defensively so both shapes work. */
+function parseCoord(v){
+  if (typeof v === 'number') return isFinite(v) ? v : null;
+  if (typeof v === 'string'){
+    let m = v.match(/value=(-?\d+(?:\.\d+)?)/);
+    if (m) { const x = parseFloat(m[1]); if (isFinite(x)) return x; }
+    const n = parseFloat(v);
+    return isNaN(n) ? null : n;
+  }
+  return null;
+}
+
+async function fetchJSON(url){
+  const r = await fetch(url, {headers:{'Accept':'application/json'}});
+  if (!r.ok){
+    let detail = '';
+    try { detail = (await r.json()).detail || ''; } catch(e){}
+    throw new Error(`${url} → HTTP ${r.status}${detail ? ': ' + detail : ''}`);
+  }
+  return r.json();
+}
+function showError(id, msg){ const el=$(id); el.textContent='⚠ '+msg; el.style.display=msg?'block':'none'; }
+
+/* ---------------- state ---------------- */
+const state = {
+  deals: [], summary: null,
+  filters:{ q:'', county:'', city:'', tier:'', debtMin:null, debtMax:null },
+  sort:{ key:'address', dir:1 },
+  page:0, pageSize:50,
+  map:{ inited:false, map:null, layer:null, features:[], county:'', tier:'' },
+};
+
+/* ---------------- tabs ---------------- */
+document.querySelectorAll('nav button').forEach(btn=>{
+  btn.addEventListener('click', ()=>{
+    document.querySelectorAll('nav button').forEach(b=>b.classList.remove('active'));
+    document.querySelectorAll('section.view').forEach(s=>s.classList.remove('active'));
+    btn.classList.add('active');
+    $('view-'+btn.dataset.view).classList.add('active');
+    if (btn.dataset.view==='map') initMap();
+  });
+});
+
+/* ================= OVERVIEW ================= */
+function aggregate(deals){
+  const tiers={}, cities={}, lenders={}, counties={};
+  let debt=0, lienPass=0, lienFail=0, valRej=0, hitl=0;
+  for (const d of deals){
+    const t=d.blast_tier||'?'; tiers[t]=(tiers[t]||0)+1;
+    const c=d.county||'unknown'; counties[c]=(counties[c]||0)+1;
+    const city=(d.city||'Unknown'); cities[city]=(cities[city]||0)+1;
+    const ln=(d.lender||'Unknown'); lenders[ln]=(lenders[ln]||0)+1;
+    const dv=num(d.mortgage_debt); if(dv&&dv>0) debt+=dv;
+    const lg=String(d.lien_gate||'').toLowerCase();
+    if (lg.startsWith('pass')) lienPass++; else if (lg) lienFail++;
+    if (String(d.val_gate||'').toUpperCase().startsWith('REJECT')) valRej++;
+    if (d.hitl_required) hitl++;
+  }
+  return {tiers,cities,lenders,counties,debt,lienPass,lienFail,valRej,hitl};
+}
+
+function barList(container, entries, total, cls){
+  const max = Math.max(1, ...entries.map(e=>e[1]));
+  $(container).innerHTML = entries.map(([name,n])=>`
+    <div class="hbar ${cls||''}">
+      <span class="hname" title="${esc(name)}">${esc(name)}</span>
+      <span class="htrack"><i style="width:${(n/max*100).toFixed(1)}%"></i></span>
+      <span class="hn">${n.toLocaleString()}</span>
+    </div>`).join('');
+}
+
+function renderOverview(){
+  const s = state.summary, deals = state.deals;
+  if (!s || !deals.length) return;
+  const agg = aggregate(deals);
+
+  $('kpiTotal').textContent = s.total.toLocaleString();
+  $('kpiTotalDetail').textContent = `${Object.keys(s.counties).length} counties · ${agg.hitl} HITL-flagged`;
+  $('kpiDebt').textContent = fmtMoney(agg.debt, true);
+  $('kpiDebtDetail').textContent = `${s.with_debt} deals with recorded debt`;
+  const pct = s.total ? (s.geocoded/s.total*100) : 0;
+  $('kpiGeo').textContent = pct.toFixed(1)+'%';
+  $('kpiGeoDetail').textContent =
+    `${s.geocoded.toLocaleString()} points (${esc(s.geocoded_source||'deals')})`;
+
+  const ck = Object.entries(s.counties);
+  const cmax = Math.max(1, ...ck.map(e=>e[1]));
+  $('kpiCounties').innerHTML = ck.map(([c,n])=>`
+    <div class="chip-row">
+      <span class="chip-name">${esc(c)}</span>
+      <span class="chip-bar"><i style="width:${(n/cmax*100).toFixed(1)}%"></i></span>
+      <span class="chip-n">${n.toLocaleString()} · ${(n/s.total*100).toFixed(1)}%</span>
+    </div>`).join('');
+
+  barList('tierBars', Object.entries(agg.tiers).sort(), s.total, 'tier');
+  barList('cityBars',
+    Object.entries(agg.cities).sort((a,b)=>b[1]-a[1]).slice(0,10), s.total);
+
+  $('gateStrip').innerHTML = `
+    <span class="gchip pass">LIEN PASS <b>${agg.lienPass}</b></span>
+    <span class="gchip fail">LIEN FAIL <b>${agg.lienFail}</b></span>
+    <span class="gchip warn">VAL REJECTED <b>${agg.valRej}</b></span>
+    <span class="gchip warn">HITL <b>${agg.hitl}</b></span>`;
+
+  const top = Object.entries(agg.lenders).sort((a,b)=>b[1]-a[1]).slice(0,10);
+  $('lenderTable').innerHTML =
+    '<tr><th>Lender</th><th style="text-align:right">Filings</th></tr>' +
+    top.map(([l,n])=>`<tr><td title="${esc(l)}">${esc(l.length>34?l.slice(0,33)+'…':l)}</td>`+
+                     `<td class="n">${n}</td></tr>`).join('');
+
+  $('ovSub').textContent = `${s.total} deals · refreshed ${new Date().toLocaleTimeString()}`;
+  $('footStamp').textContent = 'data loaded ' + new Date().toLocaleTimeString();
+}
+
+/* ================= DEALS TABLE ================= */
+const COLUMNS = [
+  {key:'address',       label:'Address',   kind:'str'},
+  {key:'county',        label:'County',    kind:'str'},
+  {key:'city',          label:'City',      kind:'str'},
+  {key:'owner',         label:'Owner',     kind:'str'},
+  {key:'sqft',          label:'SqFt',      kind:'int'},
+  {key:'cad_value',     label:'CAD Value', kind:'money'},
+  {key:'mortgage_debt', label:'Debt',      kind:'money'},
+  {key:'lender',        label:'Lender',    kind:'str'},
+  {key:'ltv_pct',       label:'LTV %',     kind:'pct'},
+  {key:'equity_pct',    label:'Equity %',  kind:'pct'},
+  {key:'preliminary_mao',label:'MAO',      kind:'money'},
+  {key:'lien_gate',     label:'Lien',      kind:'gate'},
+  {key:'val_gate',      label:'Val',       kind:'valgate'},
+  {key:'blast_tier',    label:'Tier',      kind:'tier'},
+];
+
+function renderHead(){
+  $('dealsHeadRow').innerHTML = COLUMNS.map(c=>
+    `<th class="${['int','money','pct'].includes(c.kind)?'num':''}" data-key="${c.key}">
+       ${c.label}<span class="arrow"></span></th>`).join('');
+  $('dealsHeadRow').querySelectorAll('th').forEach(th=>{
+    th.addEventListener('click', ()=>{
+      const key = th.dataset.key;
+      state.sort.dir = (state.sort.key===key) ? -state.sort.dir : 1;
+      state.sort.key = key; state.page = 0;
+      renderTable();
+    });
+  });
+}
+
+function filteredDeals(){
+  const f = state.filters;
+  const q = f.q.toLowerCase();
+  let rows = state.deals.filter(d=>{
+    if (f.county && (d.county||'').toLowerCase() !== f.county.toLowerCase()) return false;
+    if (f.city && (d.city||'') !== f.city) return false;
+    if (f.tier && (d.blast_tier||'') !== f.tier) return false;
+    const debt = num(d.mortgage_debt);
+    if (f.debtMin != null && !(debt != null && debt >= f.debtMin)) return false;
+    if (f.debtMax != null && !(debt != null && debt <= f.debtMax)) return false;
+    if (q){
+      const hay = [d.address,d.owner,d.lender,d.parcel_id].map(x=>String(x||'')).join(' ').toLowerCase();
+      if (!hay.includes(q)) return false;
+    }
+    return true;
+  });
+  const col = COLUMNS.find(c=>c.key===state.sort.key) || COLUMNS[0];
+  const dir = state.sort.dir;
+  rows.sort((a,b)=>{
+    let va=a[col.key], vb=b[col.key];
+    if (['int','money','pct'].includes(col.kind)){ va=num(va); vb=num(vb); }
+    else { va=String(va==null?'':va).toLowerCase(); vb=String(vb==null?'':vb).toLowerCase(); }
+    if (va==null || va==='') return  1;   // blanks always sink
+    if (vb==null || vb==='') return -1;
+    if (va<vb) return -1*dir; if (va>vb) return 1*dir; return 0;
+  });
+  return rows;
+}
+
+function cellHTML(col, d){
+  const v = d[col.key];
+  switch(col.kind){
+    case 'int':  return `<td class="num">${v==null?'—':Number(v).toLocaleString()}</td>`;
+    case 'money':return `<td class="num">${fmtMoney(num(v))}</td>`;
+    case 'pct':  { const n=num(v); return `<td class="num">${n==null?'—':n.toFixed(1)}</td>`; }
+    case 'gate': {
+      const g=String(v||'').toLowerCase();
+      const cls=g.startsWith('pass')?'pass':(g?'fail':'neutral');
+      return `<td><span class="badge ${cls}">${esc(shortWord(v)||'—')}</span></td>`; }
+    case 'valgate': {
+      const g=String(v||'');
+      const up=g.toUpperCase();
+      const cls=up.startsWith('PASS')?'pass':(up.startsWith('REJECT')?'rej':'neutral');
+      return `<td><span class="badge ${cls}" title="${esc(g)}">${esc(shortWord(g)||'—')}</span></td>`; }
+    case 'tier': {
+      const t=String(v||'');
+      const cls=['t0','t1','t2','t3'].includes(t.toLowerCase())?t.toLowerCase():'neutral';
+      return `<td><span class="badge ${cls}">${esc(t||'—')}</span></td>`; }
+    default:
+      if (col.key==='address') return `<td class="addr" title="${esc(v)}">${esc(v||'—')}</td>`;
+      if (col.key==='county')  return `<td class="dim">${esc(String(v||'—'))}</td>`;
+      if (col.key==='lender')  return `<td class="dim" title="${esc(v)}" style="max-width:190px;overflow:hidden;text-overflow:ellipsis">${esc(v||'—')}</td>`;
+      return `<td>${esc(v==null||v===''?'—':v)}</td>`;
+  }
+}
+
+function renderTable(){
+  // header arrows
+  $('dealsHeadRow').querySelectorAll('th').forEach(th=>{
+    th.classList.toggle('sorted', th.dataset.key===state.sort.key);
+    th.querySelector('.arrow').textContent =
+      th.dataset.key===state.sort.key ? (state.sort.dir>0?' ▲':' ▼') : '';
+  });
+
+  const rows = filteredDeals();
+  const pages = Math.max(1, Math.ceil(rows.length/state.pageSize));
+  if (state.page >= pages) state.page = pages-1;
+  const start = state.page*state.pageSize;
+  const slice = rows.slice(start, start+state.pageSize);
+
+  $('dealsBody').innerHTML = slice.length
+    ? slice.map(d=>'<tr>'+COLUMNS.map(c=>cellHTML(c,d)).join('')+'</tr>').join('')
+    : '<tr><td colspan="'+COLUMNS.length+'" class="empty-msg">No deals match the current filters.</td></tr>';
+
+  $('pgLabel').textContent = `page ${state.page+1} / ${pages}`;
+  $('matchLabel').textContent =
+    `${rows.length.toLocaleString()} of ${state.deals.length.toLocaleString()} deals · showing ${slice.length}`;
+  $('dealsSub').textContent = `${rows.length.toLocaleString()} matching deals`;
+  $('pgPrev').disabled = state.page===0;
+  $('pgNext').disabled = state.page>=pages-1;
+}
+
+function populateFilterOptions(){
+  const uniq = (fn)=>Array.from(new Set(state.deals.map(fn).filter(Boolean))).sort();
+  const fill=(sel, values)=>{
+    const cur=$(sel).value;
+    $(sel).innerHTML='<option value="">All</option>'+
+      values.map(v=>`<option${v===cur?' selected':''}>${esc(v)}</option>`).join('');
+  };
+  fill('fCounty', uniq(d=>d.county));
+  fill('fCity',   uniq(d=>d.city));
+  fill('fTier',   uniq(d=>d.blast_tier).sort());
+}
+
+function wireFilters(){
+  let deb=null;
+  $('fSearch').addEventListener('input', e=>{
+    clearTimeout(deb);
+    deb=setTimeout(()=>{ state.filters.q=e.target.value.trim(); state.page=0; renderTable(); },140);
+  });
+  $('fCounty').addEventListener('change', e=>{ state.filters.county=e.target.value; state.page=0; renderTable(); });
+  $('fCity')  .addEventListener('change', e=>{ state.filters.city=e.target.value;   state.page=0; renderTable(); });
+  $('fTier')  .addEventListener('change', e=>{ state.filters.tier=e.target.value;   state.page=0; renderTable(); });
+  $('fDebtMin').addEventListener('change', e=>{ state.filters.debtMin=num(e.target.value); state.page=0; renderTable(); });
+  $('fDebtMax').addEventListener('change', e=>{ state.filters.debtMax=num(e.target.value); state.page=0; renderTable(); });
+  $('clearFilters').addEventListener('click', ()=>{
+    state.filters={q:'',county:'',city:'',tier:'',debtMin:null,debtMax:null};
+    $('fSearch').value=''; $('fCounty').value=''; $('fCity').value='';
+    $('fTier').value=''; $('fDebtMin').value=''; $('fDebtMax').value='';
+    state.page=0; renderTable();
+  });
+  $('pgPrev').addEventListener('click', ()=>{ if(state.page>0){state.page--; renderTable();} });
+  $('pgNext').addEventListener('click', ()=>{ state.page++; renderTable(); });
+}
+
+/* ================= MAP ================= */
+const CATEGORY_COLORS = {
+  'standard':'#95a5a6','high-equity':'#2ecc71','high equity':'#2ecc71',
+  'distressed':'#e67e22','foreclosure':'#e05c5c',
+};
+const TIER_RADIUS = { T0:5, T1:6, T2:8, T3:11 };
+
+function featureOf(f){
+  const p = (f.properties||{});
+  const coords = (f.geometry && f.geometry.coordinates) || [];
+  return {
+    lng: parseCoord(coords[0]), lat: parseCoord(coords[1]),
+    address:p.address||p.title||'—', city:p.city||'', county:p.county||'',
+    category:String(p.category||'Standard'), color:p['marker-color']||'#95a5a6',
+    appraised:num(p.appraised_value), ppsf:num(p.price_per_sqft),
+    dealType:p.deal_type||'', tier:String(p.blast_tier||''),
+  };
+}
+
+function initMap(){
+  if (typeof L === 'undefined'){           // CDN unreachable (offline) — degrade
+    $('map').innerHTML = '<div class="map-offline">Leaflet failed to load (offline?). '+
+      'The map view requires network access to unpkg.com — all other views work offline.</div>';
+    return;
+  }
+  if (state.map.inited){ state.map.map.invalidateSize(); rebuildMarkers(); return; }
+  state.map.inited = true;
+
+  const map = L.map('map',{ preferCanvas:true }).setView([33.05,-96.8],9);
+  L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png',{
+    attribution:'© OpenStreetMap contributors', maxZoom:19,
+  }).addTo(map);
+  state.map.layer = L.layerGroup().addTo(map);
+  state.map.map = map;
+
+  fetchJSON('/api/geojson')
+    .then(gj=>{
+      state.map.features = ((gj&&gj.features)||[]).map(featureOf)
+        .filter(f=>f.lat!=null && f.lng!=null && f.lat!==0 && f.lng!==0);
+      const uniq=(fn)=>Array.from(new Set(state.map.features.map(fn).filter(Boolean))).sort();
+      const fill=(sel,values)=>{
+        const cur=$(sel).value;
+        $(sel).innerHTML='<option value="">All</option>'+
+          values.map(v=>`<option${v===cur?' selected':''}>${esc(v)}</option>`).join('');
+      };
+      fill('mCounty', uniq(f=>f.county)); fill('mTier', uniq(f=>f.tier));
+      rebuildMarkers();
+    })
+    .catch(err=>showError('mapError','Map data unavailable: '+err.message));
+
+  $('mCounty').addEventListener('change', e=>{ state.map.county=e.target.value; rebuildMarkers(); });
+  $('mTier')  .addEventListener('change', e=>{ state.map.tier=e.target.value;  rebuildMarkers(); });
+}
+
+function popupHTML(f){
+  return `<div style="min-width:220px;font:12.5px/1.4 sans-serif">
+    <div style="font-weight:700;margin-bottom:3px">${esc(f.address)}</div>
+    <div style="color:#666">${esc(f.city)} · ${esc(f.county)}</div>
+    <div style="margin:5px 0">
+      <span class="badge neutral">${esc(f.category)}</span>
+      ${f.tier?`<span class="badge ${esc(f.tier.toLowerCase())}">${esc(f.tier)}</span>`:''}
+      ${f.dealType?`<span class="badge neutral">${esc(f.dealType)}</span>`:''}
+    </div>
+    <div>CAD appraised: <b>${fmtMoney(f.appraised)}</b></div>
+    <div>Price/sqft: <b>${f.ppsf!=null?f.ppsf.toFixed(2):'—'}</b></div>
+  </div>`;
+}
+
+function rebuildMarkers(){
+  const layer = state.map.layer;
+  if (!layer) return;
+  layer.clearLayers();
+  const cf=state.map.county.toLowerCase(), tf=state.map.tier;
+  let shown=0;
+  for (const f of state.map.features){
+    if (cf && (f.county||'').toLowerCase()!==cf) continue;
+    if (tf && f.tier!==tf) continue;
+    shown++;
+    const color = CATEGORY_COLORS[f.category.toLowerCase()] || f.color || '#95a5a6';
+    L.circleMarker([f.lat,f.lng],{
+      radius:TIER_RADIUS[f.tier]||5, color:color, weight:1.5,
+      fillColor:color, fillOpacity:.65,
+    }).bindPopup(popupHTML(f)).addTo(layer);
+  }
+  const sub=document.querySelector('#view-map .sub');
+  if (sub) sub.textContent =
+    `live_foreclosures.geojson · ${shown} / ${state.map.features.length} features plotted`;
+}
+
+/* ================= STATS ================= */
+function mdToHtml(md){
+  // Minimal markdown→text renderer: headings, bullets, bold, pipe tables.
+  const lines = esc(md).split(/\r?\n/);
+  let html='', list=false, table=false;
+  const closeList=()=>{ if(list){html+='</ul>'; list=false;} };
+  const closeTable=()=>{ if(table){html+='</tbody></table>'; table=false;} };
+  const inline=(s)=>s.replace(/\*\*(.+?)\*\*/g,'<strong>$1</strong>');
+  for (const raw of lines){
+    const line=raw.trimEnd();
+    if (/^\|/.test(line)){
+      closeList();
+      const cells=line.split('|').slice(1,-1).map(c=>c.trim());
+      if (cells.every(c=>/^:?-{2,}:?$/.test(c))) continue;   // separator row
+      if (!table){ html+='<table><tbody>'; table=true; }
+      html+='<tr>'+cells.map(c=>'<td>'+inline(c)+'</td>').join('')+'</tr>';
+      continue;
+    }
+    closeTable();
+    if (/^#\s/.test(line)){ closeList(); html+='<h1>'+inline(line.slice(2))+'</h1>'; }
+    else if (/^##\s/.test(line)){ closeList(); html+='<h2>'+inline(line.slice(3))+'</h2>'; }
+    else if (/^-\s/.test(line)){
+      if(!list){ html+='<ul>'; list=true; }
+      html+='<li>'+inline(line.slice(2))+'</li>';
+    }
+    else if (line===''){ closeList(); }
+    else { closeList(); html+='<p>'+inline(line)+'</p>'; }
+  }
+  closeList(); closeTable();
+  return html;
+}
+
+async function loadStats(){
+  showError('statsError','');
+  $('statsBody').innerHTML='<p class="dim">Computing portfolio statistics…</p>';
+  try{
+    const payload = await fetchJSON('/api/stats');
+    $('statsBody').innerHTML = mdToHtml(payload.report||'(empty report)') +
+      `<div class="meta-line">enriched ${payload.enriched} records · skipped ${payload.skipped}`+
+      ` · computed ${new Date().toLocaleTimeString()}</div>`;
+  }catch(err){
+    $('statsBody').innerHTML='<p class="dim">unavailable</p>';
+    showError('statsError','Stats unavailable: '+err.message);
+  }
+}
+
+/* ================= BOOT ================= */
+function setStatus(ok, text){
+  $('statusDot').className = 'dot'+(ok?' ok':'');
+  $('statusText').textContent = text;
+}
+
+async function boot(){
+  renderHead(); wireFilters();
+  try{
+    const [summary, deals] = await Promise.all([
+      fetchJSON('/api/summary'), fetchJSON('/api/deals'),
+    ]);
+    state.summary=summary; state.deals=deals;
+    setStatus(true,'API live');
+    renderOverview();
+    populateFilterOptions();
+    renderTable();
+  }catch(err){
+    setStatus(false,'API offline');
+    showError('ovError','Data unavailable: '+err.message);
+    showError('dealsError','Data unavailable: '+err.message);
+  }
+}
+
+$('refreshAllBtn').addEventListener('click', boot);
+$('statsRefresh').addEventListener('click', loadStats);
+
+boot();
+</script>
+</body>
+</html>
