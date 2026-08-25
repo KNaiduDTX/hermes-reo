@@ -1,12 +1,12 @@
 # HERMES-REO — developer workflow entry points.
-# `make help` lists targets. CI (.github/workflows/ci.yml) runs the same gates.
+# `make help` lists targets. `make ci-local` mirrors the GitHub Actions job (.github/workflows/ci.yml).
 
 PY       := .venv/bin/python
 RUFF     := .venv/bin/ruff
 SOFFICE  := /Applications/LibreOffice.app/Contents/MacOS/soffice
 XLSX     := out/HERMES-REO_Model_Suite.xlsx
 
-.PHONY: help setup lock lint lint-full test test-live checks fixture build recalc verify all clean
+.PHONY: help setup lock lint lint-full test test-live checks fixture build recalc verify ci-local all clean
 
 help:
 	@echo "make setup    - create venv + install pinned deps + playwright browser"
@@ -20,6 +20,7 @@ help:
 	@echo "make build    - rebuild the Excel workbook"
 	@echo "make recalc   - LibreOffice headless recalc + recalculated verification"
 	@echo "make verify   - lint + tests + checks + fixture + build (CI parity)"
+	@echo "make ci-local - exact CI parity: the gates CI runs (verify; recalc stays local)"
 	@echo "make all      - verify + recalc"
 
 setup:
@@ -58,6 +59,13 @@ recalc: build
 
 verify: lint test checks fixture build
 	@echo "== verify: ALL GATES GREEN =="
+
+# Exact parity with .github/workflows/ci.yml job `verify`: same gates (lint,
+# pytest default set excluding live/recalc, checks, fixture, build), reusing the
+# `verify` target as the single source of truth so CI and local can never drift.
+# Recalc is intentionally excluded (LibreOffice is local-only): run `make recalc`.
+ci-local: verify
+	@echo "== ci-local: matches CI job 'verify' — ALL GATES GREEN =="
 
 all: verify recalc
 

@@ -6,6 +6,7 @@ on:
 
 jobs:
   verify:
+    # Local parity target: `make ci-local` (same gates; deps come from `make setup` locally).
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
