@@ -219,3 +219,34 @@ The architecture is genuinely good — provenance-chained records, gate-first de
 
 **Gate status:** lint ✓ · 55 unit tests ✓ · self-checks ✓ · offline fixture ✓ · workbook ✓ · recalc+8 ✓
 | OCR timeout worker / binary-atomic PDF writes | ✅ DONE — pytesseract timeout=30 + PIL bomb guard; write_bytes atomic binary writer for downloads |
+
+---
+
+# TIER A–D COMPLETION — Aug 25, 2026
+## A. Code polish ✅
+Timezone-aware provenance timestamps (6 sites); M6 deal-type-aware lien-survival selection in bid ceilings (+4 tests); repo-local git hooks (commit: ruff+no-utcnow, push: unit tests) via core.hooksPath; full public-API type hints across six core modules.
+
+## B. Operational runs against live sources ✅ (honest outcomes)
+- **bulk-dcad**: 291→130 after new invalid-query guard (161 legacy-scrape artifacts skipped: legal-prose fragments, out-of-state strings). **46 CPRs enriched**, ~91 fields written back atomically; sqft coverage 5→37 (survived regeneration via merge-on-write). 34 ambiguous first-result matches fail-closed as `mismatch` — correct wrong-property protection; cached for future disambiguation.
+- **Live DCAD integration fixed during ops**: real detail pages use bare `Address:` label + nbsp + abbreviated street types; extractor adapted, live probe parsed $518k/3bd/2006.
+- **geocode-backfill**: 38/338 coordinates recovered (from 0). Census rejects most ALL-CAPS legacy address strings; failed lookups lack negative-caching → follow-up logged.
+- **live tier**: pytest -m live 3/3 vs real county portals post-rewrite.
+- **fresh scrape**: find_deals regenerated dataset with merge-on-write holding all DCAD enrichment.
+
+## C. Business-gap enablers ✅
+- `python -m src.hitl` — MLS/appraiser comp intake CLI; GATE-VAL HITL route now executable end-to-end (fixture CPR verified PASS conf 0.92 → VALUED).
+- `LEGAL_VERIFICATION_PACKAGE.md` — 25 constants w/ citations + attorney-notes column for TX counsel sign-off.
+- Grayson manual-channel procedure documented in SOURCE_REGISTRY.md.
+
+## D. Bigger builds ✅
+- **Dashboard** per DASHBOARD_PLAN.md: FastAPI (`server.py`, /api/deals|geojson|stats|summary) + dark SPA UI (KPIs, filterable table, Leaflet map, stats panel); 9 smoke tests; boots offline.
+- **Transaction lifecycle** (`src/transaction.py`, 27 tests): whitelisted state machine over post-offer columns, redemption calendar (180d/730d + IRS 120d), policy-driven escrow schedule.
+- **ADR-0001**: PostgreSQL/Dagster deferral reaffirmed with explicit trigger thresholds + migration sketch.
+
+## Remaining known-open (post A–D)
+1. Address-quality remediation of legacy scrape artifacts (blocks ~54% DCAD echo matches & most geocodes) — normalize addresses upstream in find_deals ranking too
+2. Negative-cache for failed geocodes so batches advance past permanently-failing heads
+3. CI remote: workflow ready; needs a git remote + push (user action)
+4. Manual disambiguation queue for the 34 mismatch-cached DCAD parcels
+
+**Final gates:** lint ✓ · 98 tests ✓ · self-checks ✓ · fixture ✓ · workbook ✓ · recalc+8 ✓ · live 3/3 ✓
