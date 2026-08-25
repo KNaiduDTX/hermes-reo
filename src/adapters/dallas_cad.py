@@ -13,6 +13,7 @@ import re
 from bs4 import BeautifulSoup
 from playwright.async_api import async_playwright
 
+from ..addr import STREET_TYPES, normalize_address
 from .base import SourceAdapter, SourceProvenance
 
 DCAD_URL = "https://www.dallascad.org/SearchAddr.aspx"
@@ -45,6 +46,124 @@ _FALLBACK_ADDR_LINE_RE = re.compile(
 )
 # Situs line without city/zip: street number + alpha tokens (e.g. "15806 BREEDLOVE PL")
 _SITUS_LINE_RE = re.compile(r"^\d{1,6}\s+[A-Za-z]{3,}[A-Za-z ]*$")
+
+
+# --- R2b: echo RESCUE path (abbreviation / city-glue variants) ---------------
+# Why same-property pairs used to fail this gate: of the 34 rows sitting in
+# data/dcad_cache.json under status="mismatch" when the fail-closed echo gate
+# landed, ALL 34 recorded displayed text that was page-link boilerplate or a
+# notice header rather than a situs line, while the QUERY side carried legacy-
+# scrape artifacts — 13 keys glue the city onto the street segment ("FRAZIER
+# ST DALLAS", "HOLLOW OAK ROAD LANCASTER", "BALCHSPRINGS"), 9 repeat the
+# state/zip as a "TEXAS 75216, TX 75202" tail, and 5 carry OCR/nbsp token
+# damage (families overlap). The pure-abbreviation family comes from the live
+# detail page itself, whose situs renders as "15806\xa0BREEDLOVE\xa0PL":
+# abbreviated street type, non-breaking-space separators, NO zip. The old
+# raw-token compare took the first post-number token verbatim as the entire
+# name component, so a directional prefix ("N." / "NORTH" vs a bare situs
+# line) masked the real street name ("N Cedar Hill Rd" vs "Cedar Hill Rd"),
+# any single-token wobble (an OCR-damaged name like BERKLEY/BARKLEY) dropped
+# the vote below 2-of-3, and street type was never comparable — leaving
+# nothing to substitute when the rendered line carried no zip. Identical
+# properties therefore scored mismatch; each loss mode is fixed below.
+#
+# Rescue rules (BOTH sides pass through src.addr normalization first):
+#   * nbsp/whitespace runs collapse before any tokenizing;
+#   * canonical street types compare equal (PLACE == PL, DRIVE == DR);
+#   * street_name_first is the first ALPHA token >2 chars excluding
+#     directional prefixes (N/S/E/W/NORTH/SOUTH/EAST/WEST), so a leading
+#     directional difference degrades quality to "partial", never "mismatch";
+#   * when zip5 is missing on one side, canonical street-type equality may
+#     substitute for zip in the 2-of-3 vote (component "street_type");
+#   * comparison stays city-independent — city strings are never compared;
+#   * a present-and-CONFLICTING street number is decisive: the grid echoed a
+#     different property, so extra agreement elsewhere can never outvote it.
+# A conflicting directional prefix or any absent base component caps quality
+# at "partial"; "exact" still requires number+name+zip present and equal on
+# both sides with agreeing directional prefixes.
+
+_DIRECTIONAL_PREFIXES = {"N", "S", "E", "W", "NORTH", "SOUTH", "EAST", "WEST"}
+_LEAD_NUM_NAME_RE = re.compile(r"^(\d+)\s+(.+)$")
+
+
+def _echo_text(address: str) -> str:
+    """Collapse nbsp + whitespace runs so token splits survive HTML rendering."""
+    return re.sub(r"\s+", " ", str(address or "").replace("\xa0", " ")).strip()
+
+
+def _first_name_token(words: list[str]) -> str | None:
+    """First ALPHA token >2 chars, skipping directional prefixes ("N", "NORTH")."""
+    for word in words:
+        tok = word.upper().rstrip(".")
+        if not tok.isalpha() or len(tok) <= 2 or tok in _DIRECTIONAL_PREFIXES:
+            continue
+        return tok
+    return None
+
+
+def _directional_prefix(words: list[str]) -> str | None:
+    """Leading directional prefix of the street name, canonically uppercased."""
+    if words:
+        tok = words[0].upper().rstrip(".")
+        if tok in _DIRECTIONAL_PREFIXES:
+            return tok
+    return None
+
+
+def _canonical_street_type(words: list[str]) -> str | None:
+    """Rightmost recognized street type, canonically abbreviated (PLACE->PL)."""
+    for word in reversed(words):
+        tok = word.upper().rstrip(".")
+        if tok in STREET_TYPES:
+            return STREET_TYPES[tok]
+    return None
+
+
+def _echo_tokens(address: str) -> dict | None:
+    """Normalization-backed tokens for echo comparison (rescue path).
+
+    Both sides route through src.addr.normalize_address so abbreviations,
+    whitespace and city-glued segments compare canonically. When the strict
+    normalizer rejects the string (zip-less situs lines, scrape garbage) we
+    fall back to cleaned raw-token scanning so a partially readable address
+    still yields comparable components instead of failing closed.
+
+    Returns {'street_number', 'street_name_first', 'zip5', 'street_type',
+    'directional'}; a component is None when absent/unreadable. Returns None
+    only for an empty address — all-None components still tokenize but can
+    never match, preserving the old garbage-in mismatch behavior.
+    """
+    cleaned = _echo_text(address)
+    if not cleaned:
+        return None
+    tokens = {
+        "street_number": None,
+        "street_name_first": None,
+        "zip5": None,
+        "street_type": None,
+        "directional": None,
+    }
+    norm = normalize_address(cleaned)
+    if norm.valid:
+        words = norm.street_name.split()
+        tokens["street_number"] = norm.street_number or None
+        tokens["street_name_first"] = _first_name_token(words)
+        tokens["street_type"] = norm.street_type or None
+        tokens["zip5"] = norm.zip5 or None
+        tokens["directional"] = _directional_prefix(words)
+        return tokens
+    lead = cleaned.split(",")[0].strip()
+    m = _LEAD_NUM_NAME_RE.match(lead)
+    if m:
+        words = m.group(2).split()
+        tokens["street_number"] = m.group(1)
+        tokens["street_name_first"] = _first_name_token(words)
+        tokens["street_type"] = _canonical_street_type(words)
+        tokens["directional"] = _directional_prefix(words)
+    zip_match = _ZIP5_RE.search(cleaned.upper())
+    if zip_match:
+        tokens["zip5"] = zip_match.group(1)
+    return tokens
 
 
 def _address_tokens(address: str) -> dict | None:
@@ -101,26 +220,49 @@ def _extract_displayed_address(soup) -> str:
 def _verify_echo(query_address: str, displayed_address: str) -> tuple[bool, str]:
     """Compare the queried address against the detail-page displayed address.
 
-    Normalized token compare over street-number, street-name-first-token and
-    zip5: at least 2 of those components must match. Returns (ok,
-    match_quality) where match_quality is 'exact' when all three components are
-    present on both sides and match, 'partial' otherwise.
+    Normalization-backed token compare over street-number, street-name-first
+    and zip5 (R2b rescue: canonical street type may substitute for zip when
+    zip is unreadable on one side): at least 2 components must match.
+    Returns (ok, match_quality) where match_quality is 'exact' when number,
+    name and zip are all present and equal on both sides AND the directional
+    prefixes agree; 'partial' for any rescued or incomplete-but-passing
+    compare; 'mismatch' when fewer than 2 components match or the street
+    numbers conflict outright; 'unverifiable'
+    when either side carries no address text at all. City strings are never
+    compared (city-independent).
     """
-    query = _address_tokens(query_address)
-    shown = _address_tokens(displayed_address)
+    query = _echo_tokens(query_address)
+    shown = _echo_tokens(displayed_address)
     if not query or not shown:
         return False, "unverifiable"
-    comparable = matches = 0
+    # Decisive negative (R2b guard): a readable street-number conflict means
+    # the grid echoed a different property — street-type/zip agreement can
+    # never outvote it ("wrong number stays mismatch").
+    if (query["street_number"] and shown["street_number"]
+            and query["street_number"] != shown["street_number"]):
+        return False, "mismatch"
+    matches = 0
+    exact_so_far = True
     for component in _ECHO_COMPONENTS:
         qv, dv = query[component], shown[component]
         if qv is None or dv is None:
-            continue  # component unverifiable on one side
-        comparable += 1
+            exact_so_far = False  # component unverifiable on one side
+            continue
         if qv == dv:
             matches += 1
-    if matches >= 2:
-        return True, ("exact" if comparable == 3 and matches == 3 else "partial")
-    return False, "mismatch"
+        else:
+            exact_so_far = False
+    # R2b rescue: zip unreadable on one side -> canonical street-type equality
+    # may cast the deciding vote; it never overrides a readable-zip verdict.
+    if query["zip5"] is None or shown["zip5"] is None:
+        qt, dt = query["street_type"], shown["street_type"]
+        if qt is not None and dt is not None and qt == dt:
+            matches += 1
+    if matches < 2:
+        return False, "mismatch"
+    if exact_so_far and query["directional"] == shown["directional"]:
+        return True, "exact"
+    return True, "partial"
 
 
 def _apply_echo_gate(parsed: dict, query_address: str, displayed_address: str) -> dict:
@@ -326,6 +468,25 @@ if __name__ == "__main__":
     # blank display -> unverifiable -> fail loud
     assert _verify_echo(query, "")[0] is False
 
+    # Self-check (R2b): echo rescue — normalization-backed compare
+    # nbsp-abbreviated live situs ("15806\xa0BREEDLOVE\xa0PL") now passes
+    ok, q = _verify_echo(query, "15806\xa0Breedlove\xa0Pl")
+    assert ok and q == "partial", (ok, q)
+    # directional-prefix difference ignored -> partial, never mismatch
+    ok, q = _verify_echo("1425 N CEDAR HILL RD, CEDAR HILL, TX 75104",
+                         "1425 Cedar Hill Rd")
+    assert ok and q == "partial", (ok, q)
+    ok, q = _verify_echo("1425 N CEDAR HILL RD, CEDAR HILL, TX 75104",
+                         "1425 Cedar Hill Rd, Cedar Hill, TX 75104")
+    assert ok and q == "partial", (ok, q)  # prefix conflict caps at partial
+    # missing zip rescued by canonical street-type equality (name token damaged)
+    ok, q = _verify_echo("2002 BERKLEY AVENUE DALLAS, TX 75224", "2002 Barkley Ave")
+    assert ok and q == "partial", (ok, q)
+    # ...but street type never overrides a readable, differing zip
+    ok, q = _verify_echo("2002 BERKLEY AVENUE DALLAS, TX 75224",
+                         "2002 Barkley Ave, Dallas, TX 75201")
+    assert not ok and q == "mismatch", (ok, q)
+
     # Self-check (R2): the gate strips property fields on mismatch
     parsed_ok = {"status": "parsed", "year_built": "2004", "improvement_sqft": "2,100"}
     gated = _apply_echo_gate(parsed_ok, query, "15806 Breedlove Pl, Addison, TX 75001")
@@ -339,4 +500,5 @@ if __name__ == "__main__":
 
     print("dallas_cad.py: address parsing self-check passed")
     print("dallas_cad.py: R2 echo-back verification self-check passed")
+    print("dallas_cad.py: R2b echo rescue (abbreviation/city-glue) self-check passed")
     print("dallas_cad.py: live DCAD search requires browser (Playwright) — skipping live test")
