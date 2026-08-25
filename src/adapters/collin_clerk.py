@@ -19,6 +19,9 @@ from playwright.async_api import async_playwright, Error as PlaywrightError
 from .base import SourceAdapter, SourceProvenance
 from ..cpr import LienRecord
 from ..dates import parse_date_any
+import logging
+
+_log = logging.getLogger(__name__)
 
 CLERK_URL = "https://collin.tx.publicsearch.us"
 UA = "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36"
@@ -148,10 +151,10 @@ async def _search_clerk(party_name: str = "", legal_description: str = "",
                     seen_doc_numbers.update(r.doc_number for r in new_rows)
                     instruments.extend(new_rows)
             except PlaywrightError as e:
-                print(f"Collin clerk: pagination stopped early (best effort): {e}")
+                _log.info(f"Collin clerk: pagination stopped early (best effort): {e}")
 
         except Exception as e:
-            print(f"Collin clerk search error: {e}")
+            _log.warning(f"Collin clerk search error: {e}")
         finally:
             await browser.close()
 
@@ -243,7 +246,7 @@ def build_lien_stack(instruments: list[RecordedInstrument]) -> list[LienRecord]:
             if inst_date is None:
                 # A release without a parseable date cannot be matched to any
                 # lien — skip it loudly rather than guess.
-                print(f"Collin clerk: release {inst.doc_number} has unparseable "
+                _log.info(f"Collin clerk: release {inst.doc_number} has unparseable "
                       f"recorded_date {inst.recorded_date!r} — not matched")
                 continue
             # Mark the most recent matching lien as released.

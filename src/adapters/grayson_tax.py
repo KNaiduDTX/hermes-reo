@@ -17,6 +17,9 @@ from bs4 import BeautifulSoup
 from playwright.async_api import async_playwright, Error as PlaywrightError
 
 from .base import SourceAdapter, NormalizedLead, SourceProvenance
+import logging
+
+_log = logging.getLogger(__name__)
 
 # Known Grayson endpoints
 # VERIFIED Aug 20 2026: taxsearch.co.grayson.tx.us:8443 is DNS NXDOMAIN (dead subdomain)
@@ -62,7 +65,7 @@ async def _try_tax_sale_portal() -> list[dict]:
                     continue
 
         except (PlaywrightError, OSError, asyncio.TimeoutError) as e:
-            print(f"Grayson tax sale portal error: {e}")
+            _log.warning(f"Grayson tax sale portal error: {e}")
         finally:
             await browser.close()
 
@@ -84,7 +87,7 @@ async def _try_county_page() -> list[dict]:
             properties = _parse_county_tax_page(html)
 
         except (PlaywrightError, OSError, asyncio.TimeoutError) as e:
-            print(f"Grayson county page error: {e}")
+            _log.warning(f"Grayson county page error: {e}")
         finally:
             await browser.close()
 
@@ -157,11 +160,11 @@ class GraysonTaxAdapter(SourceAdapter):
 
         # Fallback to county page
         if not props:
-            print("Grayson tax sale portal unreachable — trying county page...")
+            _log.info("Grayson tax sale portal unreachable — trying county page...")
             props = asyncio.run(_try_county_page())
 
         if not props:
-            print("Grayson: no tax sale data found — portal may be down or no active sales")
+            _log.info("Grayson: no tax sale data found — portal may be down or no active sales")
             return []
 
         leads = []

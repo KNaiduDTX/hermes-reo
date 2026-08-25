@@ -25,6 +25,9 @@ from bs4 import BeautifulSoup
 from playwright.async_api import async_playwright
 
 from .base import SourceAdapter, NormalizedLead, SourceProvenance
+import logging
+
+_log = logging.getLogger(__name__)
 
 BASE_URL = "https://apps2.collincountytx.gov/ForeclosureNotices"
 UA = "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
@@ -220,7 +223,7 @@ class CollinForeclosureAdapter(SourceAdapter):
                 lead.raw_data["details_status"] = _details_status(details)
                 lead.raw_data["details"] = details
                 if lead.raw_data["details_status"] == DETAILS_STATUS_ERROR:
-                    print(f"Collin foreclosure: detail scrape FAILED for "
+                    _log.warning(f"Collin foreclosure: detail scrape FAILED for "
                           f"entry {entry_id} ({details.get('error')}) — flagged "
                           f"raw_data.details_status='error', do not consume")
 
