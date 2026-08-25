@@ -177,3 +177,32 @@
 
 ## Bottom line
 The architecture is genuinely good — provenance-chained records, gate-first design, clean import DAG, honest HITL routing, and the GATE-VAL concept is the right answer to non-disclosure states. But the system currently **cannot be trusted for money decisions**: three separate paths produce confidently-wrong financial outputs (fake PROCEED, negative-purchase-profit, infinite-return-below-DSCR), the legal gate can pass vacuously, and the test suite is structurally incapable of failing. The fixes are small and surgical — Wave 0+1 is roughly a week and would move this from "impressive demo" to "defensible tool."
+
+---
+
+# REMEDIATION LOG — Aug 24, 2026
+**Method:** persistent goal + 6-agent parallel fix swarm (disjoint file ownership, pre-seeded shared contracts) + adversarial integration reviewer. Baseline commit `58b8bcd` precedes all changes; every diff reviewable wave-by-wave.
+
+## Fixed (verified by 43 unit tests + full gate run)
+| Audit ID | Fix |
+|---|---|
+| C1 | Homestead token match — Sachse false-positive dead (`tests/test_compliance_gates.py`) |
+| C2 | Bid ceiling clamped ≥0, MAO in min(), dead-deal routing (`tests/test_pricing_gates.py`) |
+| C3 | PROCEED requires economics + reviewer + alive pricing; surviving tax lien ⇒ CONDITIONAL; errored lookup ⇒ DO NOT PROCEED (`tests/test_memo_recommendation.py`) |
+| C4/C5/C6 | Workbook: BRRRR cash-flow sign; zero-filtered MEDIAN over K5:L10; DSCR-before-infinite-return verdict (`tests/test_workbook_formulas.py`) |
+| C7-fabrication | OCR/PDF adapters emit None — no invented dates/times/lenders/first-dollar liens |
+| H1/H3/F12 | purchase required (no self-confirming underwrite); walk-away ≤ MAO & ceiling; three-state pencil status |
+| H2/F5/F6 | GATE-VAL filters stale/far comps pre-scoring & pre-ARV; real recency scoring; never passes without ARV |
+| H4–H7, X2–X8 | gates kwargs split; Dallas registration/Grayson HITL; ISO-normalized date parsing; identity unwrap; synthesis ISD fix |
+| S1–S7 security | TLS restored; path traversal blocked; clerk date-sort + pagination; undefined-constant NameError eliminated; DCAD echo-back verification |
+| P1–P10, E-series, F-series, T/L/V | CLI opt-in live (zero-network default), gate halt semantics, fixture/prod namespace separation, atomic writes everywhere, honest asserting test suites |
+| Battle-test findings | `--fixture` fully offline via seeded verified liens; prod files untouchable from tests; bare pytest safe |
+
+## Deferred (tracked for Wave 3+)
+- build_workbook monolith → per-tab builder functions; logging framework (68 prints); shared constants module (pipeline 8% vs workbook 7.5% closing-cost divergence still open)
+- `_run_bulk_dcad` flat-vs-nested schema mismatch (feature still silently no-ops on current dataset); dataset coordinate backfill (0/338 geocoded)
+- Sensitivity grid intentionally varies raw arv scenarios (documented agent risk)
+- OCR timeout worker; binary-atomic PDF writes; requirements-lock refresh cadence
+
+## Gate status at close
+`make verify` = lint ✓ · 43 unit ✓ · 22 module self-checks ✓ · offline fixture ✓ · workbook build ✓ — then `make recalc`: LibreOffice round-trip + 8 recalc assertions ✓ (97 named ranges survive).
