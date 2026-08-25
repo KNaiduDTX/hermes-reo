@@ -1,0 +1,12 @@
+# Direct dependencies, pinned to the versions verified in this workspace.
+# Regenerate transitive pins into requirements-lock.txt via `make lock`.
+openpyxl==3.1.5
+playwright==1.60.0
+httpx==0.28.1
+beautifulsoup4==4.15.0
+pytesseract==0.3.13
+pillow==11.3.0
+pypdf==6.16.1
+
+# dev/test
+pytest==8.4.2
