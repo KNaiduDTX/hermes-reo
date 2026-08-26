@@ -277,3 +277,16 @@ Timezone-aware provenance timestamps (6 sites); M6 deal-type-aware lien-survival
 F1 HITL loop closure (end-to-end verified: comps→GATE-VAL pass→$138K profit→$402K offer) · RL1-RL3 adapter fail-fast/quarantine/shape-markers · RL4 run summaries + EXIT_CODES · RL5 weekly live smoke job · RL9 DCAD yield probe · RL10 file locking · RL11 census cache unify · F5-lite batch_price+CSV · F6 complete underwriting router (all 11 deal-type keys) · F7 coordinate leak fixed (119 features) · F9 digest wired · F10 grayson dispatch · F11 market analytics endpoint · FN3 cad_2025 root cause + defenses · FN4-lite address columns · FN5 money-path contracts pinned (132 tests) · FN6 coverage ratchet (55% vs 36 floor) · FN4 columns.
 **Suite: 487 tests green (was 171). Coverage 55%. CI ✓ on push.**
 **Remaining:** Wave 2 (TD1-TD9 tech-debt cluster, RL6/7/8), Wave 3 (FN1 identity spine, FN2 history, F2 comps platform), Final (FN8/FN9/FN10/FN11, F2 detail, TD10).
+
+---
+
+# WAVES 2–3 EXECUTED — Aug 26, 2026 — ALL 43 OPPORTUNITIES CLOSED
+## Wave 2 (tech-debt cluster)
+TD1 CPR declared fields + get() · TD5 CPR.from_dict · TD8 hotspot decomposition (analyze_deal cc 62→20) · TD9 render_memo/flat-record declarative refactors (byte-identical goldens) · TD3 registry single URL authority (22 endpoints, sync assertion) · TD4 two-tier adapter contract + conformance suite · RL7 details_status consumption · RL8 errors.py/net_retry.py (census migrated, 87 tests) · FN9 grayson+registry tests · TD10 pipeline annotations + pyproject.toml (pytest.ini absorbed after A/B parity proof).
+
+## Wave 3 (strategic bets + finals)
+FN1 identity spine: notice_id/property_id on every row; merge re-keyed; 335 rows → 166 genuine assets · FN2 append-only history store + churn reporting · F2 comps platform: shared store + batch HITL intake + --resume-valued-dir aggregate resume (live-verified over synthetic parcels) · FN8 README routing table + CONTRIBUTING + docs/archive with rename-preserving history · FN10 hypothesis property-based pilot (14 tests: normalizer idempotence, pricing invariants, date round-trips) · FN11 dashboard JS extracted to static/app.js + 38 UI↔API contract tests.
+
+## FINAL STATE
+**766 tests green · coverage ratchet active (55% vs 36 floor) · CI green every push · hooks enforced · README/CONTRIBUTING/ADR/doc-archive in place.**
+All 43 opportunities from OPPORTUNITY_MAP.md are executed or explicitly closed. Remaining external dependencies unchanged: MLS comp partnership, TX attorney sign-off package, Grayson manual channel.
