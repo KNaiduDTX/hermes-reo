@@ -99,8 +99,17 @@ async def _search_clerk(party_name: str = "", legal_description: str = "",
     - Search input: #basicSearchInputBox
     - Search button: button with text "Search"
     - Results: table with tr/td, columns: Grantor, Grantee, Doc Type, Recorded Date, Doc Number, Book/Vol/Page, Legal Description
+
+    Fail-fast contract (RL1): navigation and form-interaction failures
+    (PlaywrightError from goto/fill/click/content, browser launch failures,
+    timeouts) RAISE — they are never swallowed into a clean-looking [].
+    An empty return therefore means "search completed, zero instruments",
+    which GATE-LEGAL-LIEN may read as verified-clean title; a transport
+    failure propagates so callers record lien_lookup_status='error'
+    instead (see pipeline._clerk_lien_search). The ONE deliberate
+    exception is the pagination loop below, which stays best-effort.
     """
-    instruments = []
+    instruments: list[RecordedInstrument] = []
 
     async with async_playwright() as p:
         browser = await p.chromium.launch(headless=True)
@@ -128,6 +137,10 @@ async def _search_clerk(party_name: str = "", legal_description: str = "",
             # control, re-parse, and append rows until no Next is found, no
             # new rows appear, or MAX_SEARCH_PAGES is hit. Never crashes the
             # fetch — pagination problems degrade to page-1-only results.
+            # This is the ONLY swallowed-error zone (RL1): losing pages 2+
+            # degrades recall but never fabricates a false "no liens" verdict,
+            # whereas a failed navigation would leave zero instruments that
+            # look exactly like a clean-title search that never ran.
             try:
                 seen_doc_numbers = {i.doc_number for i in instruments}
                 for _ in range(MAX_SEARCH_PAGES - 1):
@@ -153,8 +166,6 @@ async def _search_clerk(party_name: str = "", legal_description: str = "",
             except PlaywrightError as e:
                 _log.info(f"Collin clerk: pagination stopped early (best effort): {e}")
 
-        except Exception as e:
-            _log.warning(f"Collin clerk search error: {e}")
         finally:
             await browser.close()
 
@@ -282,11 +293,25 @@ class CollinClerkAdapter(SourceAdapter):
 
     def fetch(self, party_name: str = "", legal_description: str = "",
               doc_types: list[str] = None) -> list[RecordedInstrument]:
-        """Search official records by party name or legal description."""
+        """Search official records by party name or legal description.
+
+        Raise-on-transport (RL1): navigation/form/browser failures propagate
+        (PlaywrightError and any other exception from the search session) —
+        a raised error must be recorded as a failed lookup (e.g.
+        lien_lookup_status='error'), never conflated with a verified-clean
+        title. An empty list is returned only when the search itself
+        completed and matched zero instruments. Pagination hiccups alone
+        degrade gracefully to page-1 results instead of raising.
+        """
         return asyncio.run(_search_clerk(party_name, legal_description, doc_types))
 
     def search_encumbrances(self, owner_name: str = "") -> list[LienRecord]:
-        """Search for encumbrances by owner name and return a lien stack."""
+        """Search for encumbrances by owner name and return a lien stack.
+
+        Inherits fetch()'s raise-on-transport contract (RL1): a transport
+        failure raises so GATE-LEGAL-LIEN can distinguish "no liens found"
+        from "title search could not be performed".
+        """
         instruments = self.fetch(party_name=owner_name)
         return build_lien_stack(instruments)
 

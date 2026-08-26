@@ -8,14 +8,31 @@ N2 retry policy: only timeouts, other transport errors, and HTTP 5xx are
 retried. 4xx responses and undecodable JSON fail fast. Backoff carries
 uniform jitter of up to half the computed delay, and there is deliberately
 no terminal sleep after the final attempt.
+
+RL11 unified negative cache: the CLI backfill (pipeline.py
+--geocode-backfill) keeps a failure ledger in data/geocode_failures.json
+while enrich_batch only ever consulted each record's own last stored status
+— the two caches never saw each other. The ledger_key / should_skip /
+record_result helpers below re-express the CLI semantics (sha1[:16] of the
+normalized census query; skip after LEDGER_MAX_ATTEMPTS fresh failures;
+success forgives) so any caller shares ONE policy and ONE key space. The
+ledgers they produce and consume are byte-compatible with pipeline's
+geocode_failures.json by construction.
 """
 from __future__ import annotations
+import hashlib
+import json
 import logging
+import os
 import random
 import time
+from datetime import datetime, timedelta, timezone
 from typing import Optional
 
 import httpx
+
+from ..addr import to_census_one_line
+from ..io_utils import write_json
 
 logger = logging.getLogger(__name__)
 
@@ -31,6 +48,19 @@ GEOCODE_RATE_LIMIT_S = 0.5
 # N2: the complete set of retryable exception types. TimeoutException is a
 # TransportError subclass in httpx; both are listed for explicitness.
 RETRYABLE_EXCEPTIONS = (httpx.TimeoutException, httpx.TransportError)
+
+# --- RL11: shared negative-ledger policy ------------------------------------
+# The one status that counts as "resolved" for every consumer.
+CENSUS_SUCCESS_STATUS = "Success"
+# Skip an address after this many failures... ...until its newest failure
+# goes stale. Mirrors pipeline.GEOCODE_MAX_ATTEMPTS / GEOCODE_FAILURE_TTL_DAYS
+# (assert-equal in tests) so both caches expire on the same policy.
+LEDGER_MAX_ATTEMPTS = 3
+LEDGER_FAILURE_TTL_DAYS = 7
+# Default ledger location: the SAME file the CLI backfill uses.
+DEFAULT_LEDGER_PATH = os.path.join(
+    os.path.dirname(os.path.abspath(__file__)), "..", "..", "data",
+    "geocode_failures.json")
 
 
 def _should_retry(exc: Optional[BaseException], status: Optional[int]) -> bool:
@@ -103,6 +133,118 @@ def _request_json(url: str, params: dict, timeout_s: float) -> tuple[Optional[di
     return None, "Failed after max retries"
 
 
+# --- RL11: shared negative-ledger helpers ------------------------------------
+
+def _ledger_now() -> datetime:
+    """Timezone-aware UTC now (never naive datetime.utcnow — see hooks)."""
+    return datetime.now(timezone.utc)
+
+
+def ledger_key(addr_key: str) -> str:
+    """Negative-cache key: sha1[:16] of the normalized census query.
+
+    Identical algorithm to pipeline.geocode_failure_key — falls back to
+    hashing the raw string when normalization rejects it, so implausible
+    addresses still get a stable identity and both caches interoperate.
+    """
+    query = to_census_one_line(addr_key or "") or (addr_key or "")
+    return hashlib.sha1(query.encode("utf-8")).hexdigest()[:16]
+
+
+def parse_ledger_ts(value) -> Optional[datetime]:
+    """Parse a ledger ISO timestamp; naive values are read as UTC."""
+    try:
+        ts = datetime.fromisoformat(str(value))
+    except (TypeError, ValueError):
+        return None
+    if ts.tzinfo is None:
+        ts = ts.replace(tzinfo=timezone.utc)
+    return ts
+
+
+def should_skip(addr_key: str, ledger: dict, retry_failed: bool = False,
+                now_fn=None) -> bool:
+    """True when *addr_key* must sit this invocation out (RL11 policy).
+
+    Skip iff its ledger entry records >= LEDGER_MAX_ATTEMPTS failures AND
+    the newest failure is younger than LEDGER_FAILURE_TTL_DAYS. A missing
+    entry, a sub-threshold tally, an unparsable/stale last_at, or
+    *retry_failed* all make the address retryable. Pure — no I/O; inject a
+    clock via *now_fn* for tests.
+    """
+    if retry_failed or not ledger:
+        return False
+    entry = ledger.get(ledger_key(addr_key))
+    if not entry:
+        return False
+    attempts = entry.get("attempts") or 0
+    if attempts < LEDGER_MAX_ATTEMPTS:
+        return False
+    last_at = parse_ledger_ts(entry.get("last_at"))
+    if last_at is None:
+        return False
+    now = now_fn() if now_fn is not None else _ledger_now()
+    age = now - last_at
+    return timedelta(0) <= age < timedelta(days=LEDGER_FAILURE_TTL_DAYS)
+
+
+def record_result(addr_key: str, ledger: dict, status: str,
+                  now_fn=None) -> bool:
+    """Fold one geocode outcome for *addr_key* into *ledger* (in place).
+
+    CENSUS_SUCCESS_STATUS forgives: any existing entry is dropped and False
+    is returned. Any other status bumps the failure tally, stamps
+    last_status/last_at, and returns True. Entry shape matches pipeline's
+    record_geocode_failure exactly so the shared file stays uniform.
+    """
+    stamp = (now_fn() if now_fn is not None else _ledger_now()).isoformat()
+    key = ledger_key(addr_key)
+    if status == CENSUS_SUCCESS_STATUS:
+        ledger.pop(key, None)
+        return False
+    entry = ledger.setdefault(key, {"attempts": 0})
+    entry["attempts"] = int(entry.get("attempts", 0)) + 1
+    entry["last_status"] = status
+    entry["last_at"] = stamp
+    return True
+
+
+def load_ledger(path: str = DEFAULT_LEDGER_PATH) -> dict:
+    """Load the shared negative ledger tolerantly: missing/corrupt -> {}.
+
+    Accepts the exact file pipeline.load_geocode_failures writes; junk
+    entries are dropped instead of failing the run.
+    """
+    try:
+        with open(path) as f:
+            raw = json.load(f)
+    except FileNotFoundError:
+        return {}
+    except (OSError, ValueError):
+        logger.warning("census ledger unreadable at %s — starting fresh", path)
+        return {}
+    if not isinstance(raw, dict):
+        logger.warning("census ledger unexpected shape at %s — starting fresh",
+                       path)
+        return {}
+    ledger: dict[str, dict] = {}
+    for key, entry in raw.items():
+        if not isinstance(entry, dict):
+            continue
+        attempts = entry.get("attempts")
+        ledger[str(key)] = {
+            "attempts": attempts if isinstance(attempts, int) else 0,
+            "last_status": str(entry.get("last_status", "")),
+            "last_at": str(entry.get("last_at", "")),
+        }
+    return ledger
+
+
+def save_ledger(ledger: dict, path: str = DEFAULT_LEDGER_PATH) -> str:
+    """Persist the shared negative ledger atomically (io_utils.write_json)."""
+    return write_json(path, ledger)
+
+
 def geocode_coordinates(lng: float, lat: float) -> dict:
     """Geocode lat/lng → census tract/block group."""
     params = {
@@ -162,11 +304,21 @@ def geocode_address(address: str) -> dict:
     }
 
 
-def enrich_batch(records: list[dict], batch_limit: int = 30) -> list[dict]:
+def enrich_batch(records: list[dict], batch_limit: int = 30,
+                 ledger: Optional[dict] = None,
+                 now_fn=None) -> list[dict]:
     """Enrich a batch of records with census demographics.
 
     Each record must have 'latitude' and 'longitude' (or 'property_address').
     Adds 'census_demographics' to record['details'].
+
+    RL11: when *ledger* (a mutable dict) is given, the shared negative cache
+    is consulted before any network work — an address whose key holds fresh
+    failures (should_skip) is left untouched WITHOUT consuming *batch_limit*
+    — and every actual geocode outcome is folded back in via record_result
+    (success forgives, failure tallies). Pass load_ledger()'s dict to share
+    the CLI's data/geocode_failures.json. ledger=None keeps the historical
+    behavior byte-for-byte.
     """
     changes = 0
     for item in records:
@@ -180,6 +332,9 @@ def enrich_batch(records: list[dict], batch_limit: int = 30) -> list[dict]:
         lng = item.get("longitude")
         addr = item.get("property_address", "")
 
+        if ledger is not None and should_skip(addr, ledger, now_fn=now_fn):
+            continue
+
         if lat and lng and lat != 0 and lng != 0:
             geo = geocode_coordinates(lng, lat)
         elif addr and addr != "Unknown":
@@ -192,6 +347,8 @@ def enrich_batch(records: list[dict], batch_limit: int = 30) -> list[dict]:
             continue
 
         details["census_demographics"] = geo
+        if ledger is not None:
+            record_result(addr, ledger, geo.get("status", ""), now_fn=now_fn)
         if geo.get("status") == "Success":
             changes += 1
         time.sleep(GEOCODE_RATE_LIMIT_S)
@@ -218,6 +375,40 @@ if __name__ == "__main__":
     # B3: rate limit is a positive constant shared with pipeline backfill
     assert GEOCODE_RATE_LIMIT_S > 0
     assert enrich_batch.__doc__  # batch entry point documented
+
+    # Self-check (RL11): negative-ledger policy, fully offline
+    from datetime import datetime as _dt, timedelta as _td, timezone as _tz
+    fixed_now = _dt(2026, 2, 10, 12, 0, 0, tzinfo=_tz.utc)
+    clock = lambda: fixed_now  # noqa: E731
+    iso_ago = lambda **kw: (fixed_now - _td(**kw)).isoformat()  # noqa: E731
+    addr = "1311 FOSTER ST CEDAR HILL TX 75104"
+    key = ledger_key(addr)
+    assert len(key) == 16
+    assert ledger_key(addr.lower()) == key          # normalized identity
+    empty: dict = {}
+    assert should_skip(addr, empty, now_fn=clock) is False
+    ledger = {key: {"attempts": LEDGER_MAX_ATTEMPTS - 1,
+                    "last_status": "Timeout", "last_at": iso_ago(hours=1)}}
+    assert should_skip(addr, ledger, now_fn=clock) is False   # below threshold
+    ledger[key]["attempts"] = LEDGER_MAX_ATTEMPTS
+    assert should_skip(addr, ledger, now_fn=clock) is True    # fresh + at cap
+    ledger[key]["last_at"] = iso_ago(days=LEDGER_FAILURE_TTL_DAYS)
+    assert should_skip(addr, ledger, now_fn=clock) is False   # stale -> retry
+    ledger[key]["last_at"] = "garbage"
+    assert should_skip(addr, ledger, now_fn=clock) is False   # unreadable -> retry
+    assert should_skip(addr, ledger, retry_failed=True, now_fn=clock) is False
+    # record_result: failure tallies, success forgives
+    fresh: dict = {}
+    assert record_result(addr, fresh, "No Matches Found", now_fn=clock) is True
+    assert record_result(addr, fresh, "Timeout", now_fn=clock) is True
+    entry = fresh[key]
+    assert entry["attempts"] == 2 and entry["last_status"] == "Timeout"
+    assert entry["last_at"] == fixed_now.isoformat()
+    assert record_result(addr, fresh, CENSUS_SUCCESS_STATUS, now_fn=clock) is False
+    assert key not in fresh                                # forgiven
+    assert record_result(addr, fresh, CENSUS_SUCCESS_STATUS, now_fn=clock) is False
+    print("census.py: RL11 ledger self-check passed "
+          "(skip matrix + record/forgive round trip)")
 
     import inspect
     src = inspect.getsource(_request_json)

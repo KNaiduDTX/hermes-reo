@@ -16,6 +16,15 @@ FIXES applied vs prior attempt:
 - No fabrication (E2): estimated_default_balance/sale_date/sale_time fall
   back to None when not stated in the notice; lender is verbatim only —
   no invented legal suffixes, no brand-name guessing
+- Shape-change marker (RL2): a portal redesign that drops #temp-region-7
+  or the blockquote[id^=display] accordions raises DallasPortalShapeError
+  instead of silently returning [] (a silent [] exits 0 and reads as
+  "zero foreclosures this month"); export_portal_health() reports
+  {links_found, pdfs_downloaded, parsed_ok} without raising
+- PDF quarantine (RL3): cached PDFs are validated (size > 1KB AND %PDF
+  header) before reuse; poisoned caches are moved to data/quarantine/ and
+  re-downloaded, and per-PDF split/process failures are tallied into the
+  fetch report {"pdf_failures": [...]} instead of crashing the county loop
 """
 from __future__ import annotations
 import os
@@ -31,6 +40,22 @@ from .base import SourceAdapter, NormalizedLead, SourceProvenance
 BASE_URL = "https://www.dallascounty.org"
 PORTAL_URL = f"{BASE_URL}/government/county-clerk/recording/foreclosures.php"
 UA = "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
+
+# RL2: raised when the portal HTML no longer matches the structure this
+# parser was built against. Callers must treat it as "marker moved or
+# redesign", never as an empty foreclosure month.
+class DallasPortalShapeError(Exception):
+    """Dallas foreclosure portal HTML lost its expected parse anchors."""
+
+
+# RL3: cached-PDF validation floor and quarantine destination. A file that
+# fails EITHER check (truncated pre-fix download, HTML error page saved as
+# .pdf, crash mid-write) is moved aside and re-downloaded — it used to be
+# handed to PdfReader forever, crashing the whole county loop.
+QUARANTINE_DIR = os.path.join(
+    os.path.dirname(os.path.abspath(__file__)), "..", "..", "data", "quarantine")
+MIN_PDF_BYTES = 1024  # "size > 1KB"
+_PDF_HEADER = b"%PDF-"
 
 # Known DFW cities for address parsing (sorted by length for longest-match-first)
 KNOWN_CITIES = sorted([
@@ -94,15 +119,29 @@ def parse_portal_links(html: bytes) -> list[dict]:
 
     Ported from lucid-noether dallas_crawler.py lines 48-100.
     Portal has accordion-style blockquotes with IDs starting with "display".
+
+    RL2: missing #temp-region-7 or zero blockquote[id^=display] accordions
+    raises DallasPortalShapeError — a redesign must never masquerade as an
+    empty month. An intact structure that merely carries no .pdf links yet
+    still returns [] (that IS an empty month, not a shape change).
     """
     soup = BeautifulSoup(html, "html.parser")
     region = soup.find(id="temp-region-7")
     if not region:
-        return []
+        raise DallasPortalShapeError(
+            "Dallas foreclosure portal shape changed: #temp-region-7 is "
+            "missing from the page HTML — parser anchors need re-verification"
+        )
 
     bqs = region.find_all(
         lambda tag: tag.name == "blockquote" and tag.get("id", "").startswith("display")
     )
+    if not bqs:
+        raise DallasPortalShapeError(
+            "Dallas foreclosure portal shape changed: zero "
+            "blockquote[id^=display] accordions under #temp-region-7 — "
+            "parser anchors need re-verification"
+        )
 
     links = []
     for bq in bqs:
@@ -124,7 +163,42 @@ def parse_portal_links(html: bytes) -> list[dict]:
     return links
 
 
-def download_pdf(url: str, local_dir: str) -> str | None:
+def is_valid_pdf(local_path: str, min_size: int = MIN_PDF_BYTES) -> bool:
+    """RL3: a reusable cached PDF must exceed 1KB AND start with a %PDF header.
+
+    Anything else on disk (truncated pre-fix download, an HTML error page
+    saved under a .pdf name) is poison for PdfReader. Unreadable/missing
+    files are invalid by definition — never raise.
+    """
+    try:
+        if os.path.getsize(local_path) <= min_size:
+            return False
+        with open(local_path, "rb") as f:
+            return f.read(len(_PDF_HEADER)) == _PDF_HEADER
+    except OSError:
+        return False
+
+
+def quarantine_pdf(local_path: str, quarantine_dir: str = QUARANTINE_DIR) -> str:
+    """Move a poisoned cached PDF into *quarantine_dir* and return its new path.
+
+    The move is atomic within the same filesystem; name collisions in the
+    quarantine directory get a .quarantined-N suffix so history is preserved.
+    """
+    os.makedirs(quarantine_dir, exist_ok=True)
+    base = os.path.basename(local_path)
+    dest = os.path.join(quarantine_dir, base)
+    n = 1
+    while os.path.exists(dest):
+        dest = os.path.join(quarantine_dir, f"{base}.quarantined-{n}")
+        n += 1
+    os.replace(local_path, dest)
+    return dest
+
+
+def download_pdf(url: str, local_dir: str,
+                 quarantine_dir: str | None = None,
+                 quarantine_log: list | None = None) -> str | None:
     """Download a PDF to local_dir. Returns local path or None.
 
     Security (finding P1 — path traversal): the filename comes from external
@@ -134,6 +208,13 @@ def download_pdf(url: str, local_dir: str) -> str | None:
     target must resolve inside local_dir (realpath containment) — otherwise
     ValueError is raised loudly instead of writing outside the directory.
     Network failures still return None (pre-existing contract).
+
+    RL3 cache validation: an existing file is reused only when it passes
+    is_valid_pdf (size > 1KB AND %PDF header); a poisoned cache entry is
+    moved to *quarantine_dir* (default QUARANTINE_DIR, i.e. data/quarantine/)
+    and re-downloaded. Quarantine moves are appended to *quarantine_log*
+    (when given) as {"path", "quarantined_to", "reason"} so callers can
+    surface healed-cache events.
     """
     os.makedirs(local_dir, exist_ok=True)
 
@@ -159,7 +240,19 @@ def download_pdf(url: str, local_dir: str) -> str | None:
         )
 
     if os.path.exists(local_path):
-        return local_path
+        if is_valid_pdf(local_path):
+            return local_path
+        quarantined_to = quarantine_pdf(local_path, quarantine_dir or QUARANTINE_DIR)
+        if quarantine_log is not None:
+            quarantine_log.append({
+                "path": local_path,
+                "quarantined_to": quarantined_to,
+                "reason": (
+                    "invalid cached PDF (must be > 1KB and start with a "
+                    "%PDF- header)"
+                ),
+            })
+        # Fall through: the poisoned cache entry is gone — re-download fresh.
 
     req = urllib.request.Request(url, headers={"User-Agent": UA})
     try:
@@ -452,10 +545,31 @@ def _ocr_status(debt, address: str, lender, all_balances: list) -> str:
     return "Partial" if has_primary else "NoDebt"
 
 
-def process_dallas_pdf(item: dict, temp_dir: str) -> list[dict]:
-    """Download, split, and parse a single city PDF."""
-    local_path = download_pdf(item["url"], temp_dir)
+def process_dallas_pdf(item: dict, temp_dir: str,
+                       quarantine_dir: str | None = None,
+                       quarantine_log: list | None = None,
+                       failure_sink: list | None = None) -> list[dict]:
+    """Download, split, and parse a single city PDF.
+
+    RL3: *quarantine_dir*/*quarantine_log* pass through to download_pdf for
+    poisoned-cache handling. When *failure_sink* (a list) is given, a failed
+    download is tallied into it as a {"stage": "download", ...} entry instead
+    of silently returning []; split/parse exceptions still propagate so the
+    caller's batch wrapper can attribute them to the "process" stage.
+    """
+    local_path = download_pdf(item["url"], temp_dir,
+                              quarantine_dir=quarantine_dir,
+                              quarantine_log=quarantine_log)
     if not local_path:
+        if failure_sink is not None:
+            failure_sink.append({
+                "url": item.get("url"),
+                "filename": item.get("filename"),
+                "city": item.get("city"),
+                "month": item.get("month"),
+                "stage": "download",
+                "error": "PDF not retrieved (network failure or refused)",
+            })
         return []
 
     notice_groups = split_pdf_pages(local_path)
@@ -508,37 +622,140 @@ def process_dallas_pdf(item: dict, temp_dir: str) -> list[dict]:
     return records
 
 
+def process_pdf_batch(items: list[dict], temp_dir: str,
+                      quarantine_dir: str | None = None) -> tuple[list[dict], dict]:
+    """Process portal PDF items one per try — a bad PDF never kills the run (RL3).
+
+    Previously an unguarded PdfReader exception (corrupt/truncated download)
+    aborted the whole county loop mid-batch. Every item now gets its own
+    try/except; failures are tallied per PDF. Returns
+    (records, report) where report carries:
+      {"pdf_failures": [{url, filename, city, month, stage, error}, ...],
+       "pdf_quarantined": [{path, quarantined_to, reason}, ...]}
+    """
+    records: list[dict] = []
+    failures: list[dict] = []
+    quarantined: list[dict] = []
+    for item in items:
+        sink: list = []
+        qlog: list = []
+        try:
+            recs = process_dallas_pdf(item, temp_dir,
+                                      quarantine_dir=quarantine_dir,
+                                      quarantine_log=qlog,
+                                      failure_sink=sink)
+            records.extend(recs)
+        except Exception as exc:
+            failures.append({
+                "url": item.get("url"),
+                "filename": item.get("filename"),
+                "city": item.get("city"),
+                "month": item.get("month"),
+                "stage": "process",
+                "error": f"{type(exc).__name__}: {exc}",
+            })
+        finally:
+            failures.extend(sink)
+            quarantined.extend(qlog)
+    return records, {"pdf_failures": failures, "pdf_quarantined": quarantined}
+
+
 class DallasForeclosureAdapter(SourceAdapter):
     """Dallas County foreclosure-notice portal adapter."""
     channel = "foreclosure_notice"
     county = "dallas"
 
-    def fetch(self, limit: int | None = None, temp_dir: str = "data/dallas_pdfs") -> list[NormalizedLead]:
-        """Fetch foreclosure listings from Dallas County PDFs."""
+    def fetch_with_report(self, limit: int | None = None,
+                          temp_dir: str = "data/dallas_pdfs",
+                          quarantine_dir: str | None = None
+                          ) -> tuple[list[NormalizedLead], dict]:
+        """fetch() plus the RL3 per-PDF health report.
+
+        Returns (leads, report) where report is:
+          {"links_found": int,
+           "pdf_failures": [...],      # per-PDF download/split/process failures
+           "pdf_quarantined": [...]}   # poisoned cache entries moved aside
+
+        RL2: a portal redesign raises DallasPortalShapeError out of this
+        method (via parse_portal_links) instead of yielding [].
+        """
         html = fetch_portal_html()
-        pdf_links = parse_portal_links(html)
-        if not pdf_links:
-            return []
+        pdf_links = parse_portal_links(html)  # raises on shape change (RL2)
+        links_found = len(pdf_links)
         if limit:
             pdf_links = pdf_links[:limit]
 
-        leads = []
-        for item in pdf_links:
-            records = process_dallas_pdf(item, temp_dir)
-            for r in records:
-                leads.append(NormalizedLead(
-                    county="dallas",
-                    parcel_id=r["entry_id"],
-                    channel="foreclosure_notice",
-                    situs_address=r["property_address"],
-                    sale_date=r["details"]["property_info"].get("Deed Date"),
-                    owner_name=r["details"]["owner_info"].get("Name"),
-                    raw_data=r,
-                ))
+        records, report = process_pdf_batch(pdf_links, temp_dir,
+                                            quarantine_dir=quarantine_dir)
+        report["links_found"] = links_found
+
+        leads = [
+            NormalizedLead(
+                county="dallas",
+                parcel_id=r["entry_id"],
+                channel="foreclosure_notice",
+                situs_address=r["property_address"],
+                sale_date=r["details"]["property_info"].get("Deed Date"),
+                owner_name=r["details"]["owner_info"].get("Name"),
+                raw_data=r,
+            )
+            for r in records
+        ]
+        return leads, report
+
+    def fetch(self, limit: int | None = None, temp_dir: str = "data/dallas_pdfs") -> list[NormalizedLead]:
+        """Fetch foreclosure listings from Dallas County PDFs.
+
+        Raises DallasPortalShapeError when the portal layout changed (RL2) —
+        an empty lead list now always means "intact portal, genuinely no
+        notices parsed". Per-PDF processing failures are tallied, not fatal;
+        call fetch_with_report() for the {"pdf_failures": [...]} detail.
+        """
+        leads, _ = self.fetch_with_report(limit=limit, temp_dir=temp_dir)
         return leads
 
     def provenance(self) -> SourceProvenance:
         return SourceProvenance(source="dallas_foreclosure_notice", source_rigor_tier=0)
+
+
+def export_portal_health(limit: int | None = None,
+                         temp_dir: str = "data/dallas_pdfs",
+                         quarantine_dir: str | None = None) -> dict:
+    """RL2: probe portal shape + PDF-pipeline health WITHOUT raising.
+
+    Returns {"links_found", "pdfs_downloaded", "parsed_ok"}:
+      links_found    — PDF links parsed from the portal HTML (0 on any
+                       shape/network failure)
+      pdfs_downloaded — PDFs present on disk after download/validation
+      parsed_ok      — PDFs that produced at least one notice record
+    Intended for run summaries / CI smoke checks so a silent scrape collapse
+    is observable as a red counter instead of a clean exit.
+    """
+    health = {"links_found": 0, "pdfs_downloaded": 0, "parsed_ok": 0}
+    try:
+        html = fetch_portal_html()
+        pdf_links = parse_portal_links(html)
+    except Exception:
+        # Shape change or network outage — the probe reports, never throws.
+        return health
+    health["links_found"] = len(pdf_links)
+    if limit:
+        pdf_links = pdf_links[:limit]
+    for item in pdf_links:
+        try:
+            local_path = download_pdf(item["url"], temp_dir,
+                                      quarantine_dir=quarantine_dir)
+        except Exception:
+            continue
+        if not local_path:
+            continue
+        health["pdfs_downloaded"] += 1
+        try:
+            if process_dallas_pdf(item, temp_dir, quarantine_dir=quarantine_dir):
+                health["parsed_ok"] += 1
+        except Exception:
+            continue
+    return health
 
 
 if __name__ == "__main__":
@@ -642,7 +859,7 @@ if __name__ == "__main__":
     real_download = download_pdf
     try:
         globals()["split_pdf_pages"] = lambda p: [[_FakePage("NOTICE OF SALE\nnothing usable")]]
-        globals()["download_pdf"] = lambda url, d: "stub.pdf"
+        globals()["download_pdf"] = lambda url, d, **kw: "stub.pdf"
         recs = process_dallas_pdf({"url": f"{BASE_URL}/x.pdf", "city": "Dallas",
                                    "month": "September"}, tmp_dir)
     finally:
@@ -657,5 +874,115 @@ if __name__ == "__main__":
     assert ocr["status"] in ("Partial", "NoDebt"), f"Unexpected status {ocr['status']!r}"
     print("dallas_foreclosure.py: PASS — scanned_notice_ocr_data keeps keys, balance None, "
           f"status={ocr['status']!r}")
+
+    # Self-check (RL2): portal shape changes raise instead of returning [].
+    try:
+        parse_portal_links(b"<html><body>redesigned</body></html>")
+        raise AssertionError("RL2 FAIL: missing #temp-region-7 did not raise")
+    except DallasPortalShapeError:
+        pass
+    no_accordions = b"<html><body><div id='temp-region-7'><p>moved</p></div></body></html>"
+    try:
+        parse_portal_links(no_accordions)
+        raise AssertionError("RL2 FAIL: zero blockquote[id^=display] did not raise")
+    except DallasPortalShapeError:
+        pass
+    intact = (b"<html><body><strong>September:</strong><div id='temp-region-7'>"
+              b"<blockquote id='display1'><a href='/f/Dallas_x.pdf'>Dallas_x.pdf</a>"
+              b"</blockquote></div></body></html>")
+    links = parse_portal_links(intact)
+    assert len(links) == 1 and links[0]["city"] == "Dallas", links
+    empty_month = (b"<html><body><div id='temp-region-7'>"
+                   b"<blockquote id='display1'><p>No postings</p></blockquote></div></body></html>")
+    assert parse_portal_links(empty_month) == [], \
+        "intact structure with zero PDF links is an empty month, not a shape change"
+    print("dallas_foreclosure.py: PASS — missing temp-region-7/display accordions "
+          "raise DallasPortalShapeError; intact-but-empty still returns []")
+
+    # Self-check (RL3): cached-PDF validation + quarantine + failure tallying.
+    pdf_dir = tempfile.mkdtemp(prefix="dallas_pdf_cache_")
+    quar_dir = os.path.join(pdf_dir, "quarantine")
+    assert is_valid_pdf(os.path.join(pdf_dir, "missing.pdf")) is False
+    tiny = os.path.join(pdf_dir, "tiny.pdf")
+    with open(tiny, "wb") as f:
+        f.write(b"%PDF-1.4 too short")
+    assert is_valid_pdf(tiny) is False, "<=1KB cached PDF must be invalid"
+    big_junk = os.path.join(pdf_dir, "junk.pdf")
+    with open(big_junk, "wb") as f:
+        f.write(b"<html>error page saved as pdf</html>" * 40)
+    assert is_valid_pdf(big_junk) is False, "non-%PDF header must be invalid"
+    real_pdf = os.path.join(pdf_dir, "real.pdf")
+    with open(real_pdf, "wb") as f:
+        f.write(b"%PDF-1.4\n" + b"x" * 2048)
+    assert is_valid_pdf(real_pdf) is True
+
+    poisoned = os.path.join(pdf_dir, "poisoned.pdf")
+    with open(poisoned, "wb") as f:
+        f.write(b"garbage" * 500)  # >1KB, wrong header — the classic poisoned cache
+    qlog = []
+
+    class _FakeResp:
+        def __init__(self, payload): self._p = payload
+        def read(self): return self._p
+        def __enter__(self): return self
+        def __exit__(self, *a): return False
+
+    good_payload = b"%PDF-1.4\n" + b"y" * 4096
+    real_urlopen = urllib.request.urlopen
+    real_sleep = time.sleep
+    try:
+        urllib.request.urlopen = lambda req, timeout=15: _FakeResp(good_payload)
+        time.sleep = lambda s: None
+        healed = download_pdf(f"{BASE_URL}/foreclosure/poisoned.pdf", pdf_dir,
+                              quarantine_dir=quar_dir, quarantine_log=qlog)
+    finally:
+        urllib.request.urlopen = real_urlopen
+        time.sleep = real_sleep
+    assert healed == os.path.join(pdf_dir, "poisoned.pdf"), healed
+    assert is_valid_pdf(healed), "re-download after quarantine must produce a valid PDF"
+    assert len(qlog) == 1 and qlog[0]["path"].endswith("poisoned.pdf"), qlog
+    assert os.path.exists(qlog[0]["quarantined_to"]), "poisoned file must survive in quarantine"
+    assert os.path.dirname(os.path.abspath(qlog[0]["quarantined_to"])) == \
+        os.path.abspath(quar_dir), "quarantined file must land in quarantine dir"
+
+    # Valid cache hit must NOT touch the network.
+    try:
+        urllib.request.urlopen = lambda req, timeout=15: (_ for _ in ()).throw(
+            AssertionError("cache hit must not re-download"))
+        time.sleep = lambda s: None
+        hit = download_pdf(f"{BASE_URL}/foreclosure/real.pdf", pdf_dir,
+                           quarantine_dir=quar_dir)
+    finally:
+        urllib.request.urlopen = real_urlopen
+        time.sleep = real_sleep
+    assert hit == real_pdf
+
+    # Per-PDF tallying: one good item + one failing item never aborts the batch.
+    items = [
+        {"url": f"{BASE_URL}/f/a.pdf", "filename": "a.pdf", "city": "Dallas", "month": "September"},
+        {"url": f"{BASE_URL}/f/b.pdf", "filename": "b.pdf", "city": "Garland", "month": "September"},
+    ]
+    calls = {"n": 0}
+    def _flaky_download(url, d, **kw):
+        calls["n"] += 1
+        if "b.pdf" in url:
+            return None
+        return real_pdf
+    real_download2 = download_pdf
+    real_split2 = split_pdf_pages
+    try:
+        globals()["download_pdf"] = _flaky_download
+        globals()["split_pdf_pages"] = lambda p: [[_FakePage("NOTICE OF SALE\nnothing usable")]]
+        recs2, report = process_pdf_batch(items, pdf_dir, quarantine_dir=quar_dir)
+    finally:
+        globals()["download_pdf"] = real_download2
+        globals()["split_pdf_pages"] = real_split2
+    assert len(recs2) == 1, "healthy PDF must survive a sibling's failure"
+    assert len(report["pdf_failures"]) == 1
+    assert report["pdf_failures"][0]["stage"] == "download"
+    assert report["pdf_failures"][0]["filename"] == "b.pdf"
+    assert report["pdf_quarantined"] == []
+    print("dallas_foreclosure.py: PASS — poisoned cache quarantined+healed, valid cache "
+          "hit skips network, per-PDF failures tallied into report")
 
     print("dallas_foreclosure.py: all self-checks passed")

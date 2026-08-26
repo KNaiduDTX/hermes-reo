@@ -6,9 +6,36 @@ to submit the address search form and parse the results page.
 
 Used to fill the gap in Dallas foreclosure data: the PDF notices only have
 address + debt, not sqft/beds/baths/year built. DCAD provides those.
+
+RL9 yield probe: with HERMES_DCAD_STATS=1 in the environment, results carry a
+"parse_stats" payload {detail_link_found, extracted_fields_count, echo_quality,
+derived_source} so regex decay (endless cache-miss re-searches) becomes
+measurable. Without the env var, behavior and result shape are unchanged.
+
+FN3 root cause — degenerate cad_value_2025: 196/198 paired rows in
+data/current_deals.json carry cad_value / cad_value_2025 == exactly 25/24
+(+4.1667%). Nothing in THIS repository derives one year from the other:
+enrichment.py reads both years verbatim from tax_info, and this adapter's
+parser historically captured a SINGLE unlabeled "Market Value" — it had no
+per-year extraction at all, so no row enriched through this codebase can
+legitimately acquire a second year. The uniform ratio is therefore a legacy
+harvest artifact: one year was synthesized upstream from the certified prior
+year with a flat 25/24 uplift instead of scraping both notice values.
+Defenses implemented here:
+  * cad_value_{YYYY}_raw strings are emitted whenever a detail page labels a
+    per-year value ("Appraised Value (2025): $749,180"), alongside parsed
+    floats under cad_value_{YYYY};
+  * any pair whose newer figure equals the older times exactly 25/24 (to
+    within display rounding) is flagged derived_source="2026" in the parsed
+    result and mirrored into parse_stats — the newer notice year is the one
+    assessments generate from the prior certified roll, so analytics can
+    never mistake such a pair for two independent observations. (The ratio
+    proves derivation; the direction is inferred from assessment practice,
+    not observable from the pair alone.)
 """
 from __future__ import annotations
 import asyncio
+import os
 import re
 from bs4 import BeautifulSoup
 from playwright.async_api import async_playwright
@@ -18,6 +45,32 @@ from .base import SourceAdapter, SourceProvenance
 
 DCAD_URL = "https://www.dallascad.org/SearchAddr.aspx"
 UA = "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
+
+# RL9: parse-yield probe switch (opt-in via environment).
+DCAD_STATS_ENV = "HERMES_DCAD_STATS"
+
+# FN3: the legacy uplift signature between paired CAD years (25/24 == +1/24).
+LEGACY_UPLIFT_NUM = 25
+LEGACY_UPLIFT_DEN = 24
+# Display-rounding tolerance in dollars: harvests round the synthesized year
+# to whole dollars (or cents), so the cross-year identity can only be checked
+# to +-half a dollar after dividing back (plus float slop). An independent
+# appraisal landing within $0.50 of EXACTLY 25/24 of its prior year is a
+# coincidence this flag is willing to accept — the marker records suspicion
+# for provenance triage, it never deletes data.
+_DERIVED_DISPLAY_TOLERANCE_USD = 0.5 + 1e-6
+
+# FN3: labeled per-year value lines on DCAD detail pages, e.g.
+# "Appraised Value (2025): $749,180" / "Market Value (2026): $387,000".
+# Cents are captured too — truncating "$780,395.83" to 780395 used to break
+# the derived-pair identity check below. The plain "Market Value:" capture
+# (no year) stays untouched below.
+_YEAR_VALUE_RE = re.compile(
+    r"(?:Appraised|Market)\s+Value\s*\((20\d{2})\)\s*:?\s*\$?\s*"
+    r"([\d,]+(?:\.\d+)?)",
+    re.IGNORECASE,
+)
+_DERIVED_PAIR_YEARS = ("2025", "2026")
 
 
 # --- R2: echo-back verification ---------------------------------------------
@@ -287,6 +340,89 @@ def _apply_echo_gate(parsed: dict, query_address: str, displayed_address: str) -
     return gated
 
 
+# --- RL9: parse-yield probe --------------------------------------------------
+# Keys of a parsed payload that describe the parse itself rather than a
+# property field — excluded from extracted_fields_count.
+_STATS_NON_FIELD_KEYS = frozenset({"status", "match_quality", "derived_source"})
+
+_TRUTHY_ENV_VALUES = frozenset({"1", "true", "yes", "on"})
+
+
+def dcad_stats_enabled(env: str | None = None) -> bool:
+    """True when HERMES_DCAD_STATS opts in (conventionally =1)."""
+    value = os.environ.get(DCAD_STATS_ENV, "") if env is None else env
+    return value.strip().lower() in _TRUTHY_ENV_VALUES
+
+
+def detect_derived_year(value_2025, value_2026) -> str | None:
+    """FN3: flag the derived side of a 25/24-shaped CAD year pair.
+
+    A pair whose 2026 figure equals 2025 * 25/24 to within display rounding
+    (half a dollar) is not two independent appraisals — one figure was
+    synthesized from the other with the legacy flat uplift (see module
+    docstring). Returns "2026" for such pairs (the newer notice year is
+    generated from the prior certified roll), else None. Missing,
+    non-positive, or unparseable years are never flagged.
+    """
+    if value_2025 is None or value_2026 is None:
+        return None
+    try:
+        v25 = float(value_2025)
+        v26 = float(value_2026)
+    except (TypeError, ValueError):
+        return None
+    if v25 <= 0 or v26 <= 0:
+        return None
+    expected_2026 = v25 * LEGACY_UPLIFT_NUM / LEGACY_UPLIFT_DEN
+    if abs(v26 - expected_2026) <= _DERIVED_DISPLAY_TOLERANCE_USD:
+        return "2026"
+    return None
+
+
+def build_parse_stats(detail_link_found: bool, parsed: dict,
+                      echo_quality: str | None) -> dict:
+    """RL9: assemble the parse-yield probe payload.
+
+    detail_link_found       — did the results grid expose a detail link?
+    extracted_fields_count  — non-None property fields parsed from the page
+                              (regex decay shows up as this trending to 0
+                              while searches keep succeeding). FN3 raw-string
+                              mirrors ("*_raw") are provenance duplicates of
+                              their parsed counterpart and are NOT counted.
+    echo_quality            — 'exact' | 'partial' | 'mismatch' | 'unverifiable'
+    derived_source          — FN3 marker when a CAD year pair carries the
+                              legacy 25/24 uplift signature
+    """
+    fields = sum(
+        1 for key, val in parsed.items()
+        if key not in _STATS_NON_FIELD_KEYS
+        and not key.endswith("_raw")
+        and val is not None
+    )
+    return {
+        "detail_link_found": bool(detail_link_found),
+        "extracted_fields_count": fields,
+        "echo_quality": echo_quality,
+        "derived_source": parsed.get("derived_source"),
+    }
+
+
+def attach_parse_stats(result: dict, parsed: dict, query_address: str,
+                       displayed_address: str, detail_link_found: bool) -> dict:
+    """Attach parse_stats onto *result* when HERMES_DCAD_STATS is enabled.
+
+    No-op (returns *result* untouched) when the probe is disabled, so the
+    default result shape stays byte-identical to pre-RL9 behavior.
+    """
+    if not dcad_stats_enabled():
+        return result
+    # Re-run the pure echo compare for its quality label; deterministic and
+    # cheap, and keeps _apply_echo_gate's contract untouched.
+    _, quality = _verify_echo(query_address, displayed_address)
+    result["parse_stats"] = build_parse_stats(detail_link_found, parsed, quality)
+    return result
+
+
 async def _search_dcad_by_address(address: str) -> dict:
     """Search DCAD by property address using Playwright.
 
@@ -309,6 +445,8 @@ async def _search_dcad_by_address(address: str) -> dict:
     street_name = m.group(2).strip()
     # Remove street suffix (DCAD says: "Do not enter the street type such as Street, Drive or Lane")
     street_name = re.sub(r'\s+(STREET|ST|DRIVE|DR|LANE|LN|COURT|CT|WAY|BOULEVARD|BLVD|AVENUE|AVE|PARKWAY|PKWY|PLACE|PL|ROAD|RD)$', '', street_name, flags=re.IGNORECASE)
+
+    detail_link_found = False
 
     async with async_playwright() as p:
         browser = await p.chromium.launch(headless=True)
@@ -341,6 +479,7 @@ async def _search_dcad_by_address(address: str) -> dict:
 
                 # Look for property detail link in the results grid
                 detail_link = soup.find("a", href=re.compile(r"Detail|PropertyDetail|PCD|AcctDetail", re.IGNORECASE))
+                detail_link_found = detail_link is not None
                 if detail_link:
                     href = detail_link.get("href", "")
                     # Handle relative URLs — DCAD uses relative paths without leading /
@@ -357,7 +496,11 @@ async def _search_dcad_by_address(address: str) -> dict:
                 # R2: verify the page we landed on is actually the queried
                 # property before trusting any parsed characteristics.
                 displayed = _extract_displayed_address(soup)
-                result = _apply_echo_gate(_parse_dcad_detail(soup), address, displayed)
+                parsed = _parse_dcad_detail(soup)
+                result = _apply_echo_gate(parsed, address, displayed)
+                # RL9: opt-in parse-yield probe; no-op unless HERMES_DCAD_STATS=1.
+                result = attach_parse_stats(result, parsed, address, displayed,
+                                            detail_link_found)
 
         except Exception as e:
             result = {"error": str(e)}
@@ -406,6 +549,32 @@ def _parse_dcad_detail(soup: BeautifulSoup) -> dict:
                 result[field] = val.replace(",", "")
             else:
                 result[field] = val
+
+    # FN3: labeled per-year values — keep the RAW string (auditable provenance:
+    # exactly what the page claimed for that year) alongside the parsed float.
+    # The legacy unlabeled "Market Value:" capture above is left untouched for
+    # backward compatibility.
+    year_raw: dict = {}
+    year_float: dict = {}
+    for m in _YEAR_VALUE_RE.finditer(text):
+        year = m.group(1)
+        if year in year_raw:
+            continue
+        year_raw[year] = " ".join(m.group(0).split())
+        try:
+            year_float[year] = float(m.group(2).replace(",", ""))
+        except ValueError:
+            continue
+    for year in sorted(year_raw):
+        result[f"cad_value_{year}_raw"] = year_raw[year]
+        if year in year_float:
+            result[f"cad_value_{year}"] = year_float[year]
+
+    # FN3: an EXACTLY 25/24 pair is a derived figure, not two observations.
+    derived = detect_derived_year(result.get(f"cad_value_{_DERIVED_PAIR_YEARS[0]}"),
+                                  result.get(f"cad_value_{_DERIVED_PAIR_YEARS[1]}"))
+    if derived:
+        result["derived_source"] = derived
 
     # Also try to extract owner name
     owner_match = re.search(r'Owner \(Current \d+\)\n(.+?)(?=\n)', text)
@@ -498,7 +667,101 @@ if __name__ == "__main__":
                  "cad_appraised_value", "match_quality"):
         assert leak not in gated_bad, f"property field {leak} leaked past gate"
 
+    # Self-check (FN3): labeled per-year values emit raw strings + floats.
+    detail_html = """
+    <html><body><table>
+      <tr><td>Year Built</td><td>2004</td></tr>
+      <tr><td>Living Area</td><td>2,100 sqft</td></tr>
+      <tr><td># Bedrooms</td><td>3</td></tr>
+      <tr><td>Market Value:</td><td>$730,673</td></tr>
+      <tr><td>Appraised Value (2025)</td><td>: $749,180</td></tr>
+      <tr><td>Appraised Value (2026)</td><td>: $780,437.50</td></tr>
+    </table></body></html>
+    """
+    parsed_years = _parse_dcad_detail(BeautifulSoup(detail_html, "html.parser"))
+    assert parsed_years["cad_appraised_value"] == "730673"  # legacy capture intact
+    assert parsed_years["cad_value_2025_raw"] == "Appraised Value (2025): $749,180"
+    assert parsed_years["cad_value_2025"] == 749180.0
+    assert parsed_years["cad_value_2026_raw"].startswith("Appraised Value (2026)")
+    assert parsed_years["cad_value_2026"] == 780437.5, \
+        f"cents must survive the year-value parse: {parsed_years['cad_value_2026']!r}"
+    assert "derived_source" not in parsed_years, \
+        "a non-25/24 pair must never be flagged as derived"
+
+    # Self-check (FN3): a cent-ROUNDED legacy 25/24 signature is still flagged.
+    uplift_html = detail_html.replace("$780,437.50", "$780,395.83")  # 749180*25/24 -> 780395.8333
+    parsed_uplift = _parse_dcad_detail(BeautifulSoup(uplift_html, "html.parser"))
+    assert parsed_uplift.get("derived_source") == "2026", parsed_uplift.get("derived_source")
+    # ...and so is one rounded to whole dollars ($780,396).
+    dollar_html = detail_html.replace("$780,437.50", "$780,396")
+    parsed_dollar = _parse_dcad_detail(BeautifulSoup(dollar_html, "html.parser"))
+    assert parsed_dollar.get("derived_source") == "2026", parsed_dollar.get("derived_source")
+
+    # Self-check (FN3): unlabeled page gains none of the new keys (back-compat).
+    plain_html = "<html><body>Market Value: $200,000 Year Built 1990</body></html>"
+    parsed_plain = _parse_dcad_detail(BeautifulSoup(plain_html, "html.parser"))
+    for key in parsed_plain:
+        assert not key.startswith("cad_value_2"), key
+    assert "derived_source" not in parsed_plain
+
+    # Self-check (RL9): env-gated stats — off by default, no shape change.
+    import os as _os
+    _saved = _os.environ.pop(DCAD_STATS_ENV, None)
+    try:
+        assert dcad_stats_enabled() is False
+        res_off = attach_parse_stats({"status": "parsed"}, parsed_ok, query,
+                                     query, True)
+        assert "parse_stats" not in res_off, "stats leaked while probe disabled"
+        _os.environ[DCAD_STATS_ENV] = "1"
+        assert dcad_stats_enabled() is True
+        ok_q = _verify_echo(query, "15806 Breedlove Pl, Addison, TX 75001")[1]
+        res_on = attach_parse_stats({"status": "parsed"}, parsed_ok, query,
+                                    "15806 Breedlove Pl, Addison, TX 75001", True)
+        stats = res_on["parse_stats"]
+        assert set(stats) == {"detail_link_found", "extracted_fields_count",
+                              "echo_quality", "derived_source"}, set(stats)
+        assert stats["detail_link_found"] is True
+        assert stats["echo_quality"] == ok_q
+        assert stats["extracted_fields_count"] == 2  # year_built + improvement_sqft
+        assert stats["derived_source"] is None
+
+        # derived_source mirrors into parse_stats (FN3 x RL9)
+        res_derived = attach_parse_stats(
+            {"status": "parsed"},
+            {"status": "parsed", "cad_value_2025": 749180.0,
+             "cad_value_2026": 780395.8333333334, "derived_source": "2026"},
+            query, query, False)
+        assert res_derived["parse_stats"]["derived_source"] == "2026"
+
+        # FN3 raw-string mirrors are provenance duplicates: they must not
+        # inflate extracted_fields_count (RL9 yield stays a decay signal).
+        res_raw = attach_parse_stats(
+            {"status": "parsed"},
+            {"status": "parsed", "year_built": "2004",
+             "cad_value_2025": 749180.0, "cad_value_2025_raw":
+                 "Appraised Value (2025): $749,180"},
+            query, query, True)
+        assert res_raw["parse_stats"]["extracted_fields_count"] == 2
+
+        # a mismatch still reports its quality through the probe
+        res_mm = attach_parse_stats(
+            {"status": "mismatch", "error": "gate"},
+            {"status": "parsed"}, query, "999 OTHER ST, DALLAS, TX 75201", True)
+        assert res_mm["parse_stats"]["echo_quality"] == "mismatch"
+
+        # only explicit opt-in values enable; "0"/"" stay off
+        for off in ("0", "", "false", "no"):
+            _os.environ[DCAD_STATS_ENV] = off
+            assert dcad_stats_enabled() is False, off
+    finally:
+        if _saved is None:
+            _os.environ.pop(DCAD_STATS_ENV, None)
+        else:
+            _os.environ[DCAD_STATS_ENV] = _saved
+
     print("dallas_cad.py: address parsing self-check passed")
     print("dallas_cad.py: R2 echo-back verification self-check passed")
     print("dallas_cad.py: R2b echo rescue (abbreviation/city-glue) self-check passed")
+    print("dallas_cad.py: FN3 per-year raw strings + exact-25/24 derived flag self-check passed")
+    print("dallas_cad.py: RL9 HERMES_DCAD_STATS parse-yield probe self-check passed")
     print("dallas_cad.py: live DCAD search requires browser (Playwright) — skipping live test")
