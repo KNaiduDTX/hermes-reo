@@ -1,4 +1,14 @@
 # HERMES-REO — Comprehensive System Report
+
+> **⚠️ ARCHIVED 2026-08-26 — SUPERSEDED.** Historical snapshot describing the
+> system as of **Aug 20, 2026**. It no longer reflects current capabilities,
+> metrics, or architecture — do not cite it as current truth.
+>
+> **Superseded by:**
+> - [`USER_GUIDE.md`](../../USER_GUIDE.md) — current operational guide (start here)
+> - [`OPPORTUNITY_MAP.md`](../../OPPORTUNITY_MAP.md) — current roadmap / what's next
+> - [`server.py`](../../server.py) + `static/index.html` — the shipped dashboard (`uvicorn server:app`)
+
 **Generated:** August 20, 2026  
 **Version:** 1.0 (production-ready for Collin/Dallas, Grayson pending)
 

@@ -16,3 +16,4 @@ pytest==8.4.2
 # FN6 coverage ratchet — pinned to the workspace-installed version; feeds the
 # --cov-fail-under gate in ci.yml / make coverage.
 pytest-cov==7.1.0
+hypothesis==6.141.1

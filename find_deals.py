@@ -7,6 +7,7 @@
 # against the prior dataset (default behavior unchanged: live scrape runs).
 from __future__ import annotations
 import json
+import re
 import sys
 import os
 from datetime import datetime, timezone
@@ -28,6 +29,8 @@ from src.compliance import gate_legal_lien
 from src.synthesis import portfolio_stats, render_stats_report, get_city
 from src.cpr import CPR, pv_value
 from src.addr import is_plausible_street_address, normalize_address
+from src.dates import parse_date_any
+from src.identity import notice_id, property_id  # FN1: identity spine contract
 from src.io_utils import write_json, write_text  # atomic crash-safe writers (shared contract)
 # TD8: shared deal-economics kernel (equity/LTV trio) so analysis and portfolio
 # rollups can never drift apart on the arithmetic.
@@ -72,27 +75,47 @@ def merge_prior_enrichment(deals: list[dict], prior_path: str) -> list[dict]:
     """Carry prior enrichment into freshly scraped deals before the write.
 
     Loads the previous current_deals.json at *prior_path* (tolerating absence
-    or corruption), keys it by normalize_deal_identity, and fills empty
-    ENRICHMENT_CARRY_FORWARD_FIELDS on each fresh record from its predecessor.
-    Mutates and returns *deals*.
+    or corruption) and fills empty ENRICHMENT_CARRY_FORWARD_FIELDS on each
+    fresh record from its predecessor. Mutates and returns *deals*.
+
+    FN1 re-key: the PRIMARY match key is now the durable property_id column.
+    The legacy (county, upper-collapsed address) identity remains only as a
+    FALLBACK, used when either side lacks an id (old datasets carry none
+    until they are regenerated once through the identity spine). When both
+    sides carry ids that DISAGREE there is deliberately no fallback match:
+    two different asset ids over one address stay two separate assets.
     """
-    prior_by_key: dict[tuple[str, str], dict] = {}
+    prior_by_property: dict[str, dict] = {}
+    prior_by_address: dict[tuple[str, str], dict] = {}
     if os.path.exists(prior_path):
         try:
             with open(prior_path, encoding="utf-8") as fh:
                 for old in json.load(fh):
-                    key = normalize_deal_identity(old.get("county"),
-                                                  old.get("address"))
-                    prior_by_key[key] = old
+                    pid = str(old.get("property_id") or "")
+                    if pid:
+                        prior_by_property[pid] = old
+                    prior_by_address[normalize_deal_identity(
+                        old.get("county"), old.get("address"))] = old
         except (OSError, ValueError) as exc:
             print(f"  ⚠️ Merge-on-write: unreadable prior dataset ({exc!r}) "
                   f"— continuing without carry-forward")
-            prior_by_key = {}
+            prior_by_property, prior_by_address = {}, {}
 
-    records_merged = fields_carried = 0
+    records_merged = fields_carried = id_matches = fallback_matches = 0
     for fresh in deals:
-        prior = prior_by_key.get(
-            normalize_deal_identity(fresh.get("county"), fresh.get("address")))
+        fresh_pid = str(fresh.get("property_id") or "")
+        prior = prior_by_property.get(fresh_pid) if fresh_pid else None
+        if prior is not None:
+            id_matches += 1
+        else:
+            # FN1 fallback: only when at least one side lacks an id.
+            prior = prior_by_address.get(normalize_deal_identity(
+                fresh.get("county"), fresh.get("address")))
+            if prior is not None and fresh_pid \
+                    and str(prior.get("property_id") or ""):
+                prior = None              # both have ids and they disagree
+            if prior is not None:
+                fallback_matches += 1
         if not prior:
             continue
         carried_here = 0
@@ -106,7 +129,9 @@ def merge_prior_enrichment(deals: list[dict], prior_path: str) -> list[dict]:
             fields_carried += carried_here
 
     print(f"  Merge-on-write: {records_merged}/{len(deals)} refreshed record(s), "
-          f"{fields_carried} enrichment field(s) carried forward from prior dataset")
+          f"{fields_carried} enrichment field(s) carried forward from prior "
+          f"dataset (by property_id: {id_matches}, by legacy address fallback: "
+          f"{fallback_matches})")
     return deals
 
 
@@ -167,6 +192,205 @@ def strip_invalid_query_markers(deals: list[dict]) -> list[dict]:
     """
     return [{k: v for k, v in d.items() if k != INVALID_QUERY_KEY}
             for d in deals]
+
+
+# --- FN2: per-run history store (data/history/) --------------------------------
+# After every regeneration the full deals payload is snapshotted to
+# data/history/YYYY-MM-DD.json (atomic io_utils.write_json) together with a
+# derived "notices" block: the accumulated per-property observation history
+# folded across every snapshot on disk. data/history/index.json keeps the
+# compact {property_id: {first_seen, last_seen, seen_count}} rollup merged
+# across runs, so first-seen memory survives even if daily snapshots are
+# later pruned. All derivation lives in derive_history — a pure function.
+HISTORY_INDEX_FILENAME = "index.json"
+_HISTORY_SNAPSHOT_RE = re.compile(r"^\d{4}-\d{2}-\d{2}\.json$")
+
+
+def _load_json_object(path: str):
+    """Parsed dict at *path*, or None when missing/corrupt/not an object."""
+    try:
+        with open(path, encoding="utf-8") as fh:
+            payload = json.load(fh)
+    except (OSError, ValueError):
+        return None
+    return payload if isinstance(payload, dict) else None
+
+
+def load_previous_snapshots(history_dir: str, exclude_date: str = "") -> list:
+    """Every well-formed daily snapshot on disk, oldest first.
+
+    Only files named YYYY-MM-DD.json are considered; corrupt or non-object
+    payloads are skipped with a warning (history derivation degrades, never
+    crashes). *exclude_date* drops today's own file so a same-day re-run
+    cannot double-count observations it is about to overwrite anyway.
+    """
+    if not os.path.isdir(history_dir):
+        return []
+    snapshots = []
+    for name in sorted(os.listdir(history_dir)):
+        if not _HISTORY_SNAPSHOT_RE.match(name):
+            continue
+        date_str = name[:10]
+        if date_str == exclude_date:
+            continue
+        snapshot = _load_json_object(os.path.join(history_dir, name))
+        if snapshot is None:
+            print(f"  ⚠️ History: unreadable snapshot skipped: {name}")
+            continue
+        snapshot.setdefault("date", date_str)
+        snapshots.append(snapshot)
+    snapshots.sort(key=lambda snap: str(snap.get("date") or ""))
+    return snapshots
+
+
+def derive_history(previous_snapshots: list, current: dict) -> dict:
+    """Accumulated per-property history across snapshots (pure, testable).
+
+    Walks every snapshot's deals oldest-first (previous snapshots ordered by
+    their "date", then *current*'s own rows last) and folds, per property_id:
+
+      first_seen / last_seen — oldest/newest run date observed
+      seen_count             — number of DISTINCT run dates the property
+                               appeared on (same-day re-runs never inflate)
+      sale_dates             — ISO-normalized, in first-observation order;
+                               format drift collapses ("Tuesday, the 1st day
+                               of September, 2026" == "09/01/2026")
+      debt_changes           — [(from, to)] between consecutive run dates,
+                               recorded only when BOTH ends are known values
+      lender_changes         — [(from, to)] between consecutive run dates,
+                               recorded only when BOTH ends are non-empty
+
+    Snapshots without a usable "date" and rows without a property_id are
+    skipped. Returns {property_id: {...}} — JSON-ready (lists, not tuples).
+    """
+    dated: list = []
+    for snapshot in sorted(previous_snapshots,
+                           key=lambda snap: str(snap.get("date") or "")):
+        date_str = str(snapshot.get("date") or "")
+        if not date_str:
+            continue
+        for row in (snapshot.get("deals") or []):
+            if isinstance(row, dict):
+                dated.append((date_str, row))
+    current_date = str(current.get("date") or "")
+    for row in (current.get("deals") or []):
+        if isinstance(row, dict):
+            dated.append((current_date, row))
+
+    history: dict = {}
+    last_seen: dict = {}
+    for date_str, row in dated:
+        pid = str(row.get("property_id") or "")
+        if not pid:
+            continue
+        entry = history.get(pid)
+        if entry is None:
+            entry = history[pid] = {
+                "first_seen": date_str, "last_seen": date_str,
+                "seen_count": 0, "sale_dates": [],
+                "debt_changes": [], "lender_changes": [],
+            }
+            last_seen[pid] = {"date": None, "debt": None, "lender": None}
+        if date_str < entry["first_seen"]:
+            entry["first_seen"] = date_str
+        if date_str > entry["last_seen"]:
+            entry["last_seen"] = date_str
+        prev = last_seen[pid]
+        new_day = bool(date_str) and date_str != prev["date"]
+        if new_day:
+            entry["seen_count"] += 1
+            if prev["date"] is not None:
+                debt = row.get("mortgage_debt")
+                if debt is not None and prev["debt"] is not None \
+                        and debt != prev["debt"]:
+                    entry["debt_changes"].append([prev["debt"], debt])
+                lender = str(row.get("lender") or "").strip()
+                if lender and prev["lender"] and lender != prev["lender"]:
+                    entry["lender_changes"].append([prev["lender"], lender])
+        parsed = parse_date_any(row.get("sale_date"))
+        sale_iso = parsed.isoformat() if parsed else \
+            str(row.get("sale_date") or "").strip()
+        if sale_iso and sale_iso.upper() != "UNKNOWN" \
+                and sale_iso not in entry["sale_dates"]:
+            entry["sale_dates"].append(sale_iso)
+        prev.update({"date": date_str,
+                     "debt": row.get("mortgage_debt"),
+                     "lender": str(row.get("lender") or "").strip()})
+    return history
+
+
+def merge_history_index(existing: dict, derived: dict) -> dict:
+    """Fold newly derived rollups into the persistent index (monotone).
+
+    Dates take min/max across both sources so an entry outlives its daily
+    snapshots (pruning old files can never regress first_seen/last_seen);
+    seen_count takes the max. Output rows keep exactly the index schema
+    {first_seen, last_seen, seen_count}, sorted by property_id.
+    """
+    merged: dict = {}
+    for pid in sorted(set(existing) | set(derived)):
+        sides = [side for side in (existing.get(pid), derived.get(pid))
+                 if isinstance(side, dict)]
+        firsts = [s["first_seen"] for s in sides
+                  if isinstance(s.get("first_seen"), str) and s["first_seen"]]
+        lasts = [s["last_seen"] for s in sides
+                 if isinstance(s.get("last_seen"), str) and s["last_seen"]]
+        counts = [s["seen_count"] for s in sides
+                  if isinstance(s.get("seen_count"), int)
+                  and not isinstance(s.get("seen_count"), bool)]
+        merged[pid] = {
+            "first_seen": min(firsts) if firsts else "",
+            "last_seen": max(lasts) if lasts else "",
+            "seen_count": max(counts) if counts else 0,
+        }
+    return merged
+
+
+def update_history_store(history_dir: str, run_date: str,
+                         deals_payload: list) -> tuple:
+    """Snapshot this run into the history store and refresh the index.
+
+    Writes <history_dir>/<run_date>.json = {"date", "deals", "notices"}
+    atomically (full deals snapshot plus the derived notices block), then
+    rewrites index.json atomically with merge_history_index. Returns
+    (snapshot_path, churn_line) where churn_line reads
+    "N properties carried, K new, M with sale-date changes"; churn is
+    measured against every snapshot strictly BEFORE <run_date>, so a
+    same-day re-run replaces today's baseline rather than stacking on it.
+    """
+    os.makedirs(history_dir, exist_ok=True)
+    run_date = str(run_date)
+    previous = load_previous_snapshots(history_dir, exclude_date=run_date)
+    snapshot = {"date": run_date, "deals": list(deals_payload)}
+    notices = derive_history(previous, snapshot)
+    snapshot_path = write_json(
+        os.path.join(history_dir, f"{run_date}.json"),
+        dict(snapshot, notices=notices))
+
+    index_path = os.path.join(history_dir, HISTORY_INDEX_FILENAME)
+    existing_index = _load_json_object(index_path) or {}
+    write_json(index_path, merge_history_index(existing_index, notices))
+
+    # Churn over THIS run's deals: "carried" = already tracked before today,
+    # "new" = first appearance today; sale-date changes count among carried.
+    # (Properties absent from today's dataset stay in history/index but are
+    # neither carried nor new — the line partitions the current run.)
+    prior_state = derive_history(previous, {"date": run_date, "deals": []})
+    current_pids = {str(row.get("property_id") or "")
+                    for row in snapshot["deals"]}
+    current_pids.discard("")
+    carried = sale_changed = 0
+    for pid in sorted(current_pids):
+        was = prior_state.get(pid)
+        if not was:
+            continue
+        carried += 1
+        if notices[pid]["sale_dates"] != was.get("sale_dates"):
+            sale_changed += 1
+    churn_line = (f"{carried} properties carried, "
+                  f"{len(current_pids) - carried} new, "
+                  f"{sale_changed} with sale-date changes")
+    return snapshot_path, churn_line
 
 
 # --- HERMES_SKIP_LIVE (offline knob) ------------------------------------------
@@ -245,6 +469,88 @@ def stamp_address_columns(deal: dict) -> dict:
     """Append ADDRESS_COLUMN_KEYS to *deal* (mutates and returns it)."""
     deal.update(address_columns(deal.get("address")))
     return deal
+
+
+# --- FN1: stable identity spine (src.identity shared contract) -----------------
+# Every analyzed row gains two ADDITIVE identity columns stamped at deal
+# construction time; they replace positional parcel ids as the join key
+# everywhere downstream:
+#
+#   notice_id   — ONE foreclosure notice: sha1 over normalized address +
+#                 lender + debt + sale-date. A postponement or re-notice
+#                 mints a NEW notice_id by design.
+#   property_id — the durable ASSET: county + canonical address. Zip noise
+#                 deliberately cannot split one asset into two ids, and the
+#                 owner joins the hash ONLY when the address is unparseable
+#                 (tiebreaker for otherwise-colliding garbage rows).
+#
+# Ids are computed from the freshly scraped row values — NOT from
+# merge-on-write carry-forward values — so they identify the notice actually
+# observed this run while carried-forward enrichment only backfills display
+# gaps. The legacy parcel_id column is left byte-for-byte untouched.
+IDENTITY_COLUMN_KEYS = ("notice_id", "property_id")
+
+
+def identity_columns(address, county, lender="", debt=None, sale_date="",
+                     owner="") -> dict:
+    """The two FN1 identity columns for one row's raw field values."""
+    addr_text = str(address or "")
+    owner_key = str(owner or "").strip()
+    norm = normalize_address(addr_text)
+    return {
+        "notice_id": notice_id(address=addr_text,
+                               lender=str(lender or ""),
+                               debt=debt,
+                               sale_date=str(sale_date or "")),
+        "property_id": property_id(
+            str(county or ""), addr_text,
+            owner=owner_key if (owner_key and not norm.valid) else ""),
+    }
+
+
+def stamp_identity_columns(deal: dict) -> dict:
+    """Append IDENTITY_COLUMN_KEYS to *deal* (mutates and returns it)."""
+    deal.update(identity_columns(
+        address=deal.get("address"), county=deal.get("county"),
+        lender=deal.get("lender"), debt=deal.get("mortgage_debt"),
+        sale_date=deal.get("sale_date"), owner=deal.get("owner")))
+    return deal
+
+
+def enrichment_richness(deal: dict) -> int:
+    """How many carry-forward enrichment fields hold usable values."""
+    return sum(1 for field_name in ENRICHMENT_CARRY_FORWARD_FIELDS
+               if not _enrichment_field_is_empty(deal.get(field_name)))
+
+
+def dedupe_by_property_id(deals: list[dict]) -> list[dict]:
+    """Collapse within-run duplicates keyed by the durable property_id.
+
+    Per property_id the RICHEST record survives — most populated
+    ENRICHMENT_CARRY_FORWARD_FIELDS; ties keep the first occurrence and
+    output order follows first appearance, so the result stays deterministic.
+    Rows without a property_id (never produced by stamp_identity_columns,
+    but possible in hand-built lists) bypass dedupe untouched.
+    """
+    winner_by_pid: dict[str, tuple] = {}
+    passthrough: dict = {}
+    for index, deal in enumerate(deals):
+        pid = str(deal.get("property_id") or "")
+        if not pid:
+            passthrough[index] = deal
+            continue
+        incumbent = winner_by_pid.get(pid)
+        if incumbent is None or \
+                enrichment_richness(deal) > enrichment_richness(incumbent[1]):
+            winner_by_pid[pid] = (index, deal)
+    survivors = dict(passthrough)
+    for index, deal in winner_by_pid.values():
+        survivors[index] = deal
+    dropped = len(deals) - len(survivors)
+    if dropped:
+        print(f"  Identity dedupe: collapsed {dropped} duplicate row(s); "
+              f"{len(winner_by_pid)} distinct property_id(s) kept")
+    return [survivors[index] for index in sorted(survivors)]
 
 
 # --- F7: GeoJSON from flat-record CPRs (coordinate-leak fix) ------------------
@@ -481,6 +787,14 @@ def main() -> None:
         print(f"  Coordinate passthrough: {coords_carried} row(s) gained "
               f"latitude/longitude from their CPR")
 
+    # FN1: stamp the stable identity spine onto every analyzed row (additive
+    # notice_id/property_id columns; legacy parcel_id untouched), then
+    # collapse within-run duplicates by durable asset id, keeping whichever
+    # record carries the most enrichment.
+    for deal in deals:
+        stamp_identity_columns(deal)
+    deals = dedupe_by_property_id(deals)
+
     # Print summary table for all deals with debt
     # Address-quality tally: malformed records stay in the saved dataset but
     # are skipped by every TOP table / equity list below.
@@ -562,6 +876,14 @@ def main() -> None:
     # so the persisted row schema is legacy keys + the FN4-lite columns only.
     deals_payload = strip_invalid_query_markers(deals)
     deals_path = write_json(deals_file, deals_payload, default=str)
+
+    # FN2: snapshot this regeneration into the history store (atomic daily
+    # file + derived notices block) and refresh the cross-run index.
+    run_date = datetime.now(timezone.utc).date().isoformat()
+    history_path, churn_line = update_history_store(
+        os.path.join(output_dir, "history"), run_date, deals_payload)
+    print(f"  Saved: {history_path}")
+    print(f"  History churn: {churn_line}")
 
     stats_path = write_text(os.path.join(output_dir, "live_portfolio_stats.md"), report)
 

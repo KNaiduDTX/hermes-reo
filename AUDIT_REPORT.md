@@ -239,7 +239,7 @@ Timezone-aware provenance timestamps (6 sites); M6 deal-type-aware lien-survival
 - Grayson manual-channel procedure documented in SOURCE_REGISTRY.md.
 
 ## D. Bigger builds ✅
-- **Dashboard** per DASHBOARD_PLAN.md: FastAPI (`server.py`, /api/deals|geojson|stats|summary) + dark SPA UI (KPIs, filterable table, Leaflet map, stats panel); 9 smoke tests; boots offline.
+- **Dashboard** per DASHBOARD_PLAN.md (now archived at `docs/archive/DASHBOARD_PLAN__2026-08-20.md`; the plan itself is delivered, not pending): FastAPI (`server.py`, /api/deals|geojson|stats|summary) + dark SPA UI (KPIs, filterable table, Leaflet map, stats panel); 9 smoke tests; boots offline.
 - **Transaction lifecycle** (`src/transaction.py`, 27 tests): whitelisted state machine over post-offer columns, redemption calendar (180d/730d + IRS 120d), policy-driven escrow schedule.
 - **ADR-0001**: PostgreSQL/Dagster deferral reaffirmed with explicit trigger thresholds + migration sketch.
 

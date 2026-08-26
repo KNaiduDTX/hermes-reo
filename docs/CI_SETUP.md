@@ -69,7 +69,8 @@ gates before code ever reaches the remote:
 
 So the normal loop needs no manual gate-running: hooks catch issues at commit/push,
 and CI confirms on the remote. Run `make ci-local` explicitly before pushing large
-changes or when bypassing hooks (`--no-verify`).
+changes or when bypassing hooks (`--no-verify`). Contributor-facing summary:
+[`CONTRIBUTING.md`](../CONTRIBUTING.md).
 
 ## 6. Tagging convention
 

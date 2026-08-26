@@ -17,7 +17,8 @@ plus thin JSON APIs over the existing pipeline data files:
 | ``POST /api/clerk-search`` | LIVE Collin clerk records search (counts + preview)           |
 | ``GET /api/market``        | group aggregates (?groupby=zip|city|isd|county)               |
 
-Design constraints (DASHBOARD_PLAN.md + delivery rules):
+Design constraints (docs/archive/DASHBOARD_PLAN__2026-08-20.md [archived — plan
+delivered] + delivery rules):
 
 * All paths are anchored to the repo root via ``Path(__file__).parent`` so the
   server runs identically from any working directory.

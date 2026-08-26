@@ -13,6 +13,7 @@
 7. [Batch Operations](#7-batch-operations)
 8. [Testing & Verification](#8-testing--verification)
 9. [Troubleshooting](#9-troubleshooting)
+10. [Documentation Map](#10-documentation-map)
 
 ---
 
@@ -477,7 +478,7 @@ The Grayson tax sale portal (`taxsearch.co.grayson.tx.us:8443`) is DNS NXDOMAIN 
 | `find_deals.py` | Batch deal finder | When you want to analyze the full 335-record dataset |
 | `test_recalc.py` | Excel verification | After rebuilding the workbook |
 | `test_live_portals.py` | Live portal tests | When verifying county portals are still up |
-| `SYSTEM_REPORT.md` | Full system report | Reference for capabilities and architecture |
+| `docs/archive/SYSTEM_REPORT__2026-08-20.md` | Full system report (**archived** 2026-08-26 — historical snapshot) | Reference for capabilities/architecture as of its date |
 | `out/HERMES-REO_Model_Suite.xlsx` | Excel workbook (formula version) | Open in Excel to underwrite deals |
 | `out/recalc/HERMES-REO_Model_Suite.xlsx` | Excel workbook (recalculated) | Read computed values without opening Excel |
 | `data/current_deals.json` | Full dataset | Source of truth for all deals |
@@ -519,3 +520,18 @@ The geocode failure ledger (`data/geocode_failures.json`) is created lazily
 on the first failed lookup — a fresh clone has none until you run
 `--geocode-backfill`. Addresses failing 3× within 7 days are skipped;
 override with `--retry-failed`.
+
+## 10. Documentation Map
+
+This guide covers daily operation. For everything else, route through
+[`README.md`](README.md) (full doc map with freshness labels) and
+[`CONTRIBUTING.md`](CONTRIBUTING.md) (setup, gates, hooks, PR flow):
+
+- **Current roadmap:** [`OPPORTUNITY_MAP.md`](OPPORTUNITY_MAP.md)
+- **Remediation history:** [`AUDIT_REPORT.md`](AUDIT_REPORT.md)
+- **Legal rules (attorney-pending):** [`LEGAL_RULES.md`](LEGAL_RULES.md),
+  [`LEGAL_VERIFICATION_PACKAGE.md`](LEGAL_VERIFICATION_PACKAGE.md)
+- **Data sources:** [`SOURCE_REGISTRY.md`](SOURCE_REGISTRY.md)
+- **CI & release process:** [`docs/CI_SETUP.md`](docs/CI_SETUP.md)
+- **Historical snapshots:** [`docs/archive/`](docs/archive/)
+  (`SYSTEM_REPORT__2026-08-20.md`, `DASHBOARD_PLAN__2026-08-20.md`)

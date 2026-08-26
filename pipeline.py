@@ -676,6 +676,57 @@ def run_resume_valued_pipeline(valued_path: str,
     return EXIT_OK
 
 
+def run_resume_valued_dir_pipeline(dir_path: str,
+                                   rehab: float = DEFAULT_REHAB_ESTIMATE,
+                                   summary: RunSummary | None = None,
+                                   output_dir: str | None = None,
+                                   dataset_path: str | None = None) -> int:
+    """F2: loop F1 --resume-valued semantics over every *.valued.json in a dir.
+
+    Thin driver over run_resume_valued_pipeline (identical per-file behavior:
+    artifacts, dataset stamping, summary counts). Files are processed in
+    sorted order and one bad file never stops the batch; the aggregate
+    {resumed, skipped_not_pass, errors} is printed at the end.
+
+    Returns 0 when EVERY file was processed to a disposition (resumed or
+    skipped-not-pass); 1 (data-missing) when any file errored or the
+    directory itself does not exist. An existing-but-empty directory is ok.
+    """
+    if not os.path.isdir(dir_path):
+        print(f"!! No such valued-CPR directory: {dir_path}")
+        return exit_code_for("data_missing")
+
+    files = sorted(os.path.join(dir_path, name)
+                   for name in os.listdir(dir_path)
+                   if name.endswith(".valued.json"))
+    aggregate = {"resumed": 0, "skipped_not_pass": 0, "errors": 0}
+    if not files:
+        print(f"No *.valued.json files in {dir_path} — nothing to resume")
+    for valued_path in files:
+        try:
+            rc = run_resume_valued_pipeline(valued_path, rehab=rehab,
+                                            summary=summary,
+                                            output_dir=output_dir,
+                                            dataset_path=dataset_path)
+        except (OSError, ValueError) as exc:
+            print(f"!! Unexpected failure resuming {valued_path}: {exc!r}")
+            rc = exit_code_for("data_missing")
+        if rc == EXIT_OK:
+            aggregate["resumed"] += 1
+        elif rc == EXIT_GATE_FAIL:
+            aggregate["skipped_not_pass"] += 1
+        else:
+            aggregate["errors"] += 1
+
+    print("\n" + "=" * 70)
+    print(f"  RESUME-DIR COMPLETE — {dir_path}")
+    print(f"  Aggregate: resumed={aggregate['resumed']} "
+          f"skipped_not_pass={aggregate['skipped_not_pass']} "
+          f"errors={aggregate['errors']} total={len(files)}")
+    print("=" * 70)
+    return EXIT_OK if aggregate["errors"] == 0 else exit_code_for("data_missing")
+
+
 def run_fixture_pipeline(allow_gate_fail_demo: bool = False,
                          summary: RunSummary | None = None) -> None:
     """Run the full pipeline on fixture data.
@@ -1487,6 +1538,9 @@ def _mode_identity(args: argparse.Namespace) -> tuple[str, dict]:
     """
     if getattr(args, "resume_valued", None):
         return "resume", {"valued_file": os.path.basename(args.resume_valued)}
+    if getattr(args, "resume_valued_dir", None):
+        return "resume", {"valued_dir":
+                          os.path.basename(os.path.abspath(args.resume_valued_dir))}
     if getattr(args, "geocode_backfill", False):
         return "geocode", {"dry_run": bool(getattr(args, "dry_run", False)),
                            "retry_failed": bool(getattr(args, "retry_failed", False))}
@@ -1538,6 +1592,12 @@ def main() -> None:
                              "`python -m src.hitl`): underwrite → price → review → "
                              "memo → offer into data/ production naming; stamps "
                              "val_gate=pass into current_deals.json on address match")
+    parser.add_argument("--resume-valued-dir", metavar="VALUED_DIR",
+                        help="F2: loop --resume-valued over every *.valued.json "
+                             "in DIR (sorted, one bad file never stops the "
+                             "batch); prints aggregate {resumed, "
+                             "skipped_not_pass, errors}; exits 0 if all "
+                             "processed")
     parser.add_argument("--min-leads", type=int, default=0,
                         help="RL2: with --live, floor on leads found — exit 4 behind a "
                              "PORTAL-SHAPE-CHANGED banner when below it (0 disables)")
@@ -1547,7 +1607,8 @@ def main() -> None:
     args = parser.parse_args()
 
     mode_selected = args.live or args.fixture or args.bulk_dcad \
-        or args.geocode_backfill or bool(args.resume_valued)
+        or args.geocode_backfill or bool(args.resume_valued) \
+        or bool(args.resume_valued_dir)
     checks_requested = args.all_checks or args.checks_only
 
     # --checks-only always means checks-and-exit. When checks were requested but
@@ -1583,6 +1644,9 @@ def main() -> None:
         if args.resume_valued:
             sys.exit(run_resume_valued_pipeline(args.resume_valued,
                                                 summary=summary))
+        elif args.resume_valued_dir:
+            sys.exit(run_resume_valued_dir_pipeline(args.resume_valued_dir,
+                                                    summary=summary))
         elif args.geocode_backfill:
             # B3: unreachable unless the flag is passed — no network otherwise.
             _run_geocode_backfill(dry_run=args.dry_run,

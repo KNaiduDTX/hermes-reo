@@ -13,7 +13,14 @@ existed to actually perform that HITL step. This module is that tool:
 
 CLI:
     python -m src.hitl --cpr data/cpr_4003592.json --comps comps.json [--out out.json]
+    python -m src.hitl --cpr ... --comps ... [--property-id P...] [--use-store]
+    python -m src.hitl --comps-dir data/comps_batches   (batch mode, F2)
     python -m src.hitl --self-check        (also runs bare, with no args)
+
+F2 comp-store integration: a passing run feeds the shared comp store
+(src/comps.py) keyed by the FN1 property_id (--property-id wins, else
+derived from county+situs); --use-store seeds GATE-VAL from that store.
+Store writes happen ONLY on pass or explicit --store-anyway.
 """
 from __future__ import annotations
 
@@ -252,7 +259,32 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--out", help="output path (default: alongside --cpr as *.valued.json)")
     parser.add_argument("--self-check", action="store_true",
                         help="run the module self-check instead of an intake run")
+    parser.add_argument("--property-id", dest="property_id", default=None,
+                        help="F2: tag the comp-store entry saved for this run "
+                             "with an explicit property_id (default: derived "
+                             "from county+situs via src.identity)")
+    parser.add_argument("--use-store", action="store_true",
+                        help="F2: seed GATE-VAL comps from the shared comp "
+                             "store; newly supplied --comps are still "
+                             "intake-validated and merged after the seeds")
+    parser.add_argument("--store-dir", metavar="DIR", default=None,
+                        help="F2: comp-store root (default: data/comps, or "
+                             "$HERMES_COMPS_DIR)")
+    parser.add_argument("--store-anyway", action="store_true",
+                        help="F2: persist comps to the store even when the "
+                             "verdict is not pass (default: pass only)")
+    parser.add_argument("--comps-dir", metavar="DIR", default=None,
+                        help="F2 MODE: batch every <parcel>.comp.json in DIR "
+                             "(with its <parcel>.json CPR) through intake -> "
+                             "GATE-VAL -> <parcel>.valued.json; parcels whose "
+                             "valued file is newer than their inputs are "
+                             "skipped; exits nonzero only on batch errors")
     args = parser.parse_args(argv)
+
+    if args.comps_dir:
+        return run_comps_dir_batch(args.comps_dir, store_dir=args.store_dir,
+                                   use_store=args.use_store,
+                                   store_anyway=args.store_anyway)
 
     if args.self_check or (args.cpr is None and args.comps is None and args.out is None):
         self_check()
@@ -274,6 +306,15 @@ def main(argv: list[str] | None = None) -> int:
         raise ValueError(f"{args.comps}: expected a JSON list of comp dicts")
 
     comps = intake_comps(raw_comps)
+
+    # F2: optional store seeding — stored comps for THIS asset lead, newly
+    # validated comps follow; duplicates collapse (order-preserving).
+    if args.use_store:
+        seeds = _seed_from_store(cpr, args.store_dir, args.property_id)
+        comps = merge_seed_comps(seeds, comps)
+        print(f"Comp store: seeded {len(seeds)} usable comp(s) "
+              f"[{store_pid_for(cpr, args.property_id)}]")
+
     prev_column = cpr.column
     gate, val_obj = run_hitl_valuation(cpr, comps)
 
@@ -289,7 +330,198 @@ def main(argv: list[str] | None = None) -> int:
     print(f"ARV: {'${:,.0f}'.format(arv) if arv else 'n/a'}")
     print(f"Column: {prev_column.value} -> {cpr.column.value}")
     print(f"Updated CPR written: {out_path}")
+
+    # F2: feed the shared comp store — pass always, anything else only under
+    # explicit --store-anyway (a rejected comp set must not poison the store).
+    if gate.verdict == "pass" or args.store_anyway:
+        pid = _persist_to_store(cpr, comps, store_dir=args.store_dir,
+                                property_id_arg=args.property_id)
+        if pid:
+            print(f"Comp store: {len(comps)} comp(s) saved under {pid}")
+
     return 0
+
+
+# --- F2: shared comp store integration ----------------------------------------
+
+def _comp_store_module():
+    """Import src.comps under either import style (package / direct-script)."""
+    try:
+        from . import comps as comp_store
+    except ImportError:  # direct-script execution
+        import comps as comp_store  # type: ignore
+    return comp_store
+
+
+def store_pid_for(cpr: CPR, property_id_arg: str | None = None) -> str:
+    """Resolve the store key for *cpr* (--property-id > cpr attr > derived)."""
+    return _comp_store_module().store_key_for_cpr(cpr, property_id_arg)
+
+
+def _seed_from_store(cpr: CPR, store_dir: str | None = None,
+                     property_id_arg: str | None = None) -> list[CompRecord]:
+    """Best-effort store seeding: a cold or broken store yields [], loudly.
+
+    Uses the SAME key resolution as persistence (explicit --property-id
+    wins), so a run seeded with --property-id reads the entry it would write.
+    """
+    try:
+        return _comp_store_module().best_seed_for(
+            cpr, comps_dir=store_dir, pid=property_id_arg)
+    except (OSError, ValueError, TypeError) as exc:
+        _warn(f"comp-store seeding failed ({exc!r}) — continuing with "
+              f"supplied comps only")
+        return []
+
+
+def _comp_dedupe_key(rec: CompRecord) -> tuple:
+    price = getattr(rec, "sale_price", None)
+    try:
+        price_key = round(float(price), 2) if price not in (None, "") else None
+    except (TypeError, ValueError):
+        price_key = price
+    return (str(getattr(rec, "address", "") or "").strip().upper(),
+            str(getattr(rec, "sale_date", "") or ""),
+            price_key)
+
+
+def merge_seed_comps(seeds: list[CompRecord],
+                     records: list[CompRecord]) -> list[CompRecord]:
+    """Order-preserving union: stored seeds first, fresh validated comps after.
+
+    A freshly supplied comp that duplicates a stored seed wins the earlier
+    slot is NOT rewritten — first occurrence keeps its place; duplicates are
+    dropped entirely so GATE-VAL never double-counts one sale.
+    """
+    merged, seen = [], set()
+    for rec in list(seeds) + list(records):
+        key = _comp_dedupe_key(rec)
+        if key in seen:
+            continue
+        seen.add(key)
+        merged.append(rec)
+    return merged
+
+
+def _persist_to_store(cpr: CPR, records: list[CompRecord],
+                      store_dir: str | None = None,
+                      property_id_arg: str | None = None) -> str | None:
+    """Save this run's comp set into the shared store; pid on success else None."""
+    pid = store_pid_for(cpr, property_id_arg)
+    try:
+        _comp_store_module().save_comps(pid, list(records), comps_dir=store_dir)
+    except (OSError, TypeError, ValueError) as exc:
+        _warn(f"comp-store save failed for {pid}: {exc!r}")
+        return None
+    return pid
+
+
+def _read_comps_payload(path: str) -> list[dict]:
+    """Read a comps json file: bare list or {"comps"/"comp_set": [...]} wrapper."""
+    with open(path, "r", encoding="utf-8") as f:
+        raw = json.load(f)
+    if isinstance(raw, dict):  # tolerate wrappers, same as the --comps path
+        raw = raw.get("comps") or raw.get("comp_set")
+    if not isinstance(raw, list):
+        raise ValueError(f"{path}: expected a JSON list of comp dicts")
+    return raw
+
+
+def _up_to_date(valued_path: str, input_paths: list[str]) -> bool:
+    """True when *valued_path* exists and nothing newer produced it already.
+
+    "Newer than inputs" is >= on purpose: a valued file written FROM these
+    inputs can share their mtime second on fast filesystems, and re-skipping
+    an already-current parcel is always safe (delete it to force a re-run).
+    """
+    if not os.path.exists(valued_path):
+        return False
+    try:
+        valued_mtime = os.path.getmtime(valued_path)
+    except OSError:
+        return False
+    for p in input_paths:
+        try:
+            if os.path.exists(p) and os.path.getmtime(p) > valued_mtime:
+                return False
+        except OSError:
+            continue
+    return True
+
+
+def run_comps_dir_batch(comp_dir: str, store_dir: str | None = None,
+                        use_store: bool = False,
+                        store_anyway: bool = False) -> int:
+    """F2 MODE: value every ``<parcel>.comp.json`` in *comp_dir* offline.
+
+    For each batch file (with its sibling ``<parcel>.json`` saved CPR):
+    load_cpr -> intake_comps -> run_hitl_valuation -> write
+    ``<parcel>.valued.json``, skipping parcels whose valued file is already
+    newer than both inputs. Passing runs feed the comp store keyed by each
+    parcel's derived property id (or everything under --store-anyway).
+
+    Prints one verdict line per parcel plus a final tally; returns 0 when no
+    batch errored (a non-pass VERDICT is a result, not an error), 1 otherwise.
+    """
+    if not os.path.isdir(comp_dir):
+        _warn(f"--comps-dir {comp_dir}: not a directory")
+        return 1
+    batches = sorted(name for name in os.listdir(comp_dir)
+                     if name.endswith(".comp.json"))
+    if not batches:
+        print(f"No *.comp.json batches in {comp_dir} — nothing to do")
+        return 0
+
+    tally: dict[str, int] = {}
+    for base in batches:
+        parcel = base[:-len(".comp.json")]
+        comp_path = os.path.join(comp_dir, base)
+        cpr_path = os.path.join(comp_dir, parcel + ".json")
+        valued_path = os.path.join(comp_dir, parcel + ".valued.json")
+
+        if _up_to_date(valued_path, [comp_path, cpr_path]):
+            tally["skipped_up_to_date"] = tally.get("skipped_up_to_date", 0) + 1
+            print(f"{parcel}: SKIP — {os.path.basename(valued_path)} is newer "
+                  f"than its inputs")
+            continue
+        if not os.path.exists(cpr_path):
+            tally["error"] = tally.get("error", 0) + 1
+            _warn(f"{parcel}: missing sibling CPR {os.path.basename(cpr_path)}")
+            continue
+
+        prev_column = None
+        try:
+            cpr = load_cpr(cpr_path)
+            records = intake_comps(_read_comps_payload(comp_path))
+            if use_store:
+                seeds = _seed_from_store(cpr, store_dir)
+                records = merge_seed_comps(seeds, records)
+            prev_column = cpr.column
+            gate, val_obj = run_hitl_valuation(cpr, records)
+        except (OSError, ValueError, TypeError) as exc:
+            tally["error"] = tally.get("error", 0) + 1
+            _warn(f"{parcel}: batch failed ({exc!r})")
+            continue
+
+        out_path = _default_out_path(cpr_path)
+        write_json(out_path, cpr.to_dict(), indent=2, default=str)
+
+        tally[gate.verdict] = tally.get(gate.verdict, 0) + 1
+        verdict = gate.verdict.upper()
+        arv = pv_value(val_obj.arv) if val_obj.arv else None
+        print(f"{parcel}: {verdict} — conf {gate.confidence:.2f}/{gate.floor:.2f}"
+              f" | ARV {'${:,.0f}'.format(arv) if arv else 'n/a'}"
+              f" | column {prev_column.value}->{cpr.column.value}")
+
+        # Store feed follows the same pass-only rule as the single-parcel mode.
+        if gate.verdict == "pass" or store_anyway:
+            pid = _persist_to_store(cpr, records, store_dir=store_dir)
+            if pid:
+                print(f"{parcel}: comp store <- {len(records)} comp(s) [{pid}]")
+
+    parts = " ".join(f"{k}={v}" for k, v in sorted(tally.items()))
+    print(f"Batch complete: {len(batches)} parcel(s) | {parts or 'nothing processed'}")
+    return 1 if tally.get("error", 0) else 0
 
 
 def self_check() -> None:

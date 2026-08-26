@@ -27,7 +27,7 @@ markers = [
     "needs_dataset: tests that read data/current_deals.json (skipped when absent)",
     "recalc: tests requiring a LibreOffice-recalculated workbook (opt in with -m recalc)",
 ]
-norecursedirs = [".venv", "data", "out", "static", ".git"]
+norecursedirs = [".venv", "data", "out", "static", ".git", ".hypothesis", ".pc-home", ".pycache3"]
 
 [tool.mypy]
 # NON-GATING: pins type-check intent only — CI wiring lands later. Not part of

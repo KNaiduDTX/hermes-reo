@@ -1,4 +1,12 @@
 # HERMES-REO Dashboard — Implementation Plan
+
+> **⚠️ ARCHIVED 2026-08-26 — DELIVERED & SUPERSEDED.** This implementation plan
+> (dated **Aug 20, 2026**) has been built and shipped: the dashboard lives in
+> [`server.py`](../../server.py) + `static/index.html` (run `uvicorn server:app`,
+> see [`USER_GUIDE.md`](../../USER_GUIDE.md)). Kept for design-decision history
+> only — do not treat open items here as backlog; the current roadmap is
+> [`OPPORTUNITY_MAP.md`](../../OPPORTUNITY_MAP.md).
+
 **Verified, validated, and cited against the actual codebase and data**
 
 **Date:** August 20, 2026  

@@ -24,3 +24,6 @@ Thumbs.db
 # pre-commit cache (repo-local)
 .pc-home/
 .coverage
+
+# hypothesis example DB
+.hypothesis/
