@@ -2,8 +2,26 @@
 {% block title %}Dossier · Parcel {{ parcel_id }} — HERMES{% endblock %}
 
 {% block head_actions %}
+<select id="dossier-parcel-select" class="btn btn-secondary" style="max-width:260px"
+        onchange="if(this.value) location='/deals/'+encodeURIComponent(this.value)">
+  <option value="{{ parcel_id }}">{{ parcel_id }} (current)</option>
+</select>
 <button class="btn btn-secondary" type="button" title="Clerk search is a human-review action (Phase 2A)">Run clerk search</button>
-<a class="btn btn-primary" href="/offers">Generate offer</a>
+<a class="btn btn-primary" href="/offers?parcel={{ parcel_id }}">Generate offer</a>
+<script>
+fetch('/api/parcels').then(r=>r.json()).then(j=>{
+  const sel=document.getElementById('dossier-parcel-select');
+  const cur=sel.value;
+  sel.innerHTML='';
+  for(const p of j.parcels){
+    const o=document.createElement('option');
+    o.value=p.parcel_id;
+    o.textContent=(p.address||p.parcel_id).slice(0,42);
+    if(p.parcel_id===cur) o.selected=true;
+    sel.appendChild(o);
+  }
+}).catch(()=>{});
+</script>
 {% endblock %}
 
 {% block body %}

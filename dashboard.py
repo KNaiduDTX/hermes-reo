@@ -186,13 +186,53 @@ def pipeline_register(request: Request):
 # --------------------------------------------------------------------------- #
 # III · Dossier
 # --------------------------------------------------------------------------- #
-def load_cpr_any(parcel_id: str) -> Optional[dict]:
-    for cand in (DATA / f"cpr_{parcel_id}.json",
+def resolve_cpr_path(parcel_id: str) -> Optional[Path]:
+    """Resolve any desk parcel id to its richest saved CPR file."""
+    for cand in (DATA / "cprs" / f"{parcel_id}.json",
+                 DATA / "cpr_{0}".format(parcel_id) and
+                 (DATA / f"cpr_{parcel_id}.json"),
                  DATA / "fixtures" / f"fixture_cpr_{parcel_id}.json"):
-        raw = _read(cand)
-        if isinstance(raw, dict):
-            return raw
+        if cand.exists():
+            return cand
+    # parcel id -> property_id mapping via dataset rows
+    for d in deals():
+        if str(d.get("parcel_id")) == str(parcel_id) \
+                or d.get("property_id") == parcel_id:
+            prop = d.get("property_id")
+            if prop:
+                p = DATA / "cprs" / f"{prop}.json"
+                if p.exists():
+                    return p
+            break
     return None
+
+
+def load_cpr_any(parcel_id: str) -> Optional[dict]:
+    path = resolve_cpr_path(parcel_id)
+    if path is None:
+        return None
+    return _read(path)
+
+
+@app.get("/api/parcels")
+def api_parcels():
+    """Every book asset for desk selectors."""
+    cpr_ids = {f.stem for f in (DATA / "cprs").glob("*.json")} \
+        if (DATA / "cprs").exists() else set()
+    out = []
+    for d in deals():
+        pid = str(d.get("parcel_id") or "")
+        out.append({
+            "parcel_id": pid,
+            "address": title_case(d.get("address")),
+            "city": title_case(d.get("city_norm") or d.get("city") or ""),
+            "county": str(d.get("county", "")).title(),
+            "cad_value": money(d.get("cad_value")) or None,
+            "property_id": d.get("property_id"),
+            "has_cpr": (pid in cpr_ids
+                        or (d.get("property_id") in cpr_ids)),
+        })
+    return {"parcels": out, "total": len(out)}
 
 
 @app.get("/deals/{parcel_id}", response_class=HTMLResponse)
@@ -424,62 +464,97 @@ def underwriting(request: Request):
 # VI · Offers
 # --------------------------------------------------------------------------- #
 @app.get("/offers", response_class=HTMLResponse)
-def offers(request: Request, deal_type: str = "DT-AUCTION"):
-    from src.negotiation import generate_offer, get_posture
+def offers(request: Request, deal_type: str = "DT-AUCTION",
+          parcel: Optional[str] = None):
+    """Per-parcel offer workbench — every number derives from the SELECTED
+    parcel (UI realtime rule), never a hardcoded fixture."""
+    from src.negotiation import generate_offer
     from src.hitl import load_cpr
     from src.pricing import price_deal
-    from src.cpr import BlastTier
+    from src.policy import (EARNEST_MONEY_MIN, EARNEST_MONEY_PCT,
+                            OPTION_FEE_MIN, OPTION_FEE_PCT)
 
-    cpr_path = DATA / "fixtures" / "fixture_cpr_4003592.json"
-    letter_html, terms, blocked = "", {}, False
-    try:
-        valued = DATA / "cpr_4003592.valued.json"
-        cpr = load_cpr(str(valued if valued.exists() else cpr_path))
-        arv = 750_000
-        rehab = 50_000
-        pricing = price_deal(cpr, arv=arv, rehab=rehab,
-                             deal_type=deal_type, factor=MAO_FACTOR_DEFAULT)
-        offer = generate_offer(cpr, pricing)
-        terms = {"offer": f"${offer.offer_price:,.0f}",
-                 "earnest": f"${offer.earnest_money:,.0f}",
-                 "option": f"${offer.option_fee:,.0f}",
-                 "closing": f"{offer.closing_timeline_days} days",
-                 "cash": offer.is_cash,
-                 "message": offer.key_message}
-        letter_html = offer.offer_letter
-        blocked = bool(offer.blocked)
-    except Exception as exc:  # noqa: BLE001 — UI must never 500 on data gaps
-        terms = {"error": str(exc)}
-    from src.policy import EARNEST_MONEY_MIN, EARNEST_MONEY_PCT, OPTION_FEE_MIN, OPTION_FEE_PCT
-    mao_ref = 475_000
+    target_parcel = parcel or "4003592"
+    path = resolve_cpr_path(target_parcel)
+    cpr_any = _read(path) if path else None
+
+    src_row = (cpr_any or {}).get("source_row") or {}
+    valuation = (cpr_any or {}).get("valuation") or {}
+    arv_v = (valuation.get("arv") or {}).get("value")
+    cad_ref = money(src_row.get("cad_value")
+                    or (cpr_any or {}).get("cad_appraised_value", {})
+                    and ((cpr_any or {}).get("cad_appraised_value") or {}).get("value"))
+    gate_pass = str(valuation.get("gate_val_verdict") or "") == "pass"
+
+    rehab = 50_000
+    if arv_v:
+        arv_p = float(arv_v)
+        mao_ref = max(0.0, arv_p * MAO_FACTOR_DEFAULT - rehab)
+    elif cad_ref:
+        arv_p = cad_ref
+        mao_ref = max(0.0, cad_ref * MAO_FACTOR_DEFAULT)
+    else:
+        arv_p, mao_ref = 750_000, 475_000
+
     factor_map = {"DT-PREFORE": 0.80, "DT-TAXDEED": 0.75, "DT-AUCTION": 0.85,
                   "DT-REO": 0.75, "DT-SHORT": 0.70}
+    opening = {code: int((mao_ref * f + 50) // 100 * 100)
+               for code, f in factor_map.items()}
+    computed_terms = {
+        code: {"opening": opening.get(code, 0),
+               "earnest": max(int(mao_ref * EARNEST_MONEY_PCT + 50) // 100 * 100,
+                              EARNEST_MONEY_MIN),
+               "option": max(round(mao_ref * OPTION_FEE_PCT), OPTION_FEE_MIN)}
+        for _, _, code in postures_list() if code != "DT-WHOLESALE"
+    }
+
+    letter_html, terms, blocked = "", {}, False
+    engine_capable = bool(path and arv_v and gate_pass)
+
+    if deal_type == "DT-WHOLESALE":
+        blocked = True
+    elif engine_capable:
+        try:
+            cpr_obj = load_cpr(str(path))
+            pricing = price_deal(cpr_obj, arv=arv_p, rehab=rehab,
+                                 deal_type=deal_type,
+                                 factor=MAO_FACTOR_DEFAULT)
+            offer = generate_offer(cpr_obj, pricing)
+            letter_html = offer.offer_letter
+            terms = {"offer": f"${offer.offer_price:,.0f}",
+                     "earnest": f"${offer.earnest_money:,.0f}",
+                     "option": f"${offer.option_fee:,.0f}",
+                     "closing": f"{offer.closing_timeline_days} days",
+                     "cash": offer.is_cash, "message": offer.key_message}
+        except Exception as exc:  # noqa: BLE001 — UI must never 500
+            terms = {"error": str(exc)}
+    else:
+        terms = {"preview": True}
+
     postures = [
         ("Pre-foreclosure", "80%", "DT-PREFORE"), ("Tax-deed", "75%", "DT-TAXDEED"),
         ("Auction", "85%", "DT-AUCTION"), ("REO", "75%", "DT-REO"),
         ("Short sale", "70%", "DT-SHORT"), ("Wholesale", "blocked", "DT-WHOLESALE"),
     ]
-    def _round100(x):
-        import math as _m
-        return int(_m.floor(x / 100 + 0.5) * 100)
-    computed_terms = {
-        code: {
-            "opening": _round100(mao_ref * factor_map.get(code, 0.85)),
-            "earnest": max(_round100(mao_ref * EARNEST_MONEY_PCT), EARNEST_MONEY_MIN),
-            "option": max(round(mao_ref * OPTION_FEE_PCT), OPTION_FEE_MIN),
-        } for _, _, code in postures if code != "DT-WHOLESALE"
-    }
-    ctx = {"request": request, "active": "offers",
-           "breadcrumb": "Desk · Offers", "postures": postures,
-           "current": deal_type, "terms": terms,
-           "computed_terms": computed_terms, "mao_ref": mao_ref,
-           "letter": letter_html, "blocked": blocked}
-    return templates.TemplateResponse("offers.html", ctx)
+    return templates.TemplateResponse("offers.html", {
+        "request": request, "active": "offers",
+        "breadcrumb": f"Desk · Offers · {target_parcel}",
+        "postures": postures, "current": deal_type, "terms": terms,
+        "letter": letter_html, "blocked": blocked,
+        "computed_terms": computed_terms, "mao_ref": mao_ref,
+        "parcel": target_parcel, "current_parcel": target_parcel,
+        "arv_display": f"${arv_p:,.0f}", "engine_capable": engine_capable,
+    })
 
 
-# --------------------------------------------------------------------------- #
-# VII · System (/pipeline)
-# --------------------------------------------------------------------------- #
+def postures_list():
+    """Single source for posture codes used by computed terms."""
+    return [("Pre-foreclosure", "80%", "DT-PREFORE"),
+            ("Tax-deed", "75%", "DT-TAXDEED"), ("Auction", "85%", "DT-AUCTION"),
+            ("REO", "75%", "DT-REO"), ("Short sale", "70%", "DT-SHORT"),
+            ("Wholesale", "blocked", "DT-WHOLESALE")]
+
+
 @app.get("/pipeline", response_class=HTMLResponse)
 def system(request: Request):
     modules = ["legal_rules", "cpr", "enrichment", "valuation", "underwriting",

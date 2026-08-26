@@ -61,6 +61,10 @@
 {% endif %}
 
 {% block head_actions %}
+<select id="offers-parcel-select" class="btn btn-secondary" style="max-width:260px"
+        onchange="if(this.value) { const u=new URL(location); u.searchParams.set('parcel', this.value); location=u; }">
+  <option value="{{ parcel or current_parcel or '4003592' }}">current parcel</option>
+</select>
 <button class="btn btn-secondary" type="button" id="of-copy"{% if not (engine_here or pb.on) %} disabled{% endif %}>Copy draft</button>
 <button class="btn btn-primary" type="button" disabled title="The desk drafts only — a human reviews and sends.">Send for review</button>
 {% endblock %}
