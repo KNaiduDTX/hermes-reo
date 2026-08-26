@@ -290,3 +290,6 @@ FN1 identity spine: notice_id/property_id on every row; merge re-keyed; 335 rows
 ## FINAL STATE
 **766 tests green · coverage ratchet active (55% vs 36 floor) · CI green every push · hooks enforced · README/CONTRIBUTING/ADR/doc-archive in place.**
 All 43 opportunities from OPPORTUNITY_MAP.md are executed or explicitly closed. Remaining external dependencies unchanged: MLS comp partnership, TX attorney sign-off package, Grayson manual channel.
+
+## E2E MILESTONE — Aug 26, 2026
+Every record in the book now has a saved, reloadable CPR (data/cprs/, keyed by durable property_id) and renders across the full desk. Parcel selectors added to Dossier + Offers; offers economics derive per-parcel. Automated whole-book validation: tests/test_desk_e2e.py (6 tests iterate all 166 assets through dossier/uw-defaults/offers). Live route matrix: all 200 incl. register-level degraded path and wholesale-blocked variant.
