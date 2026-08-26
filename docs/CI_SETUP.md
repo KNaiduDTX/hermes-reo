@@ -91,3 +91,61 @@ Conventions:
 
 > Note: no tag has been created yet as part of this change — `v0.3.0-data-quality`
 > is reserved as the next candidate once the current work is committed and green.
+
+## 7. Coverage ratchet (FN6)
+
+The `verify` job's pytest step now runs instrumented and enforces a floor:
+
+```
+pytest --cov=src --cov=server --cov-report=term-missing --cov-fail-under=36
+```
+
+Rules of the ratchet:
+
+- **ONLY-INCREASES.** `--cov-fail-under` starts one point above the measured
+  baseline (~35% across `src/` + `server.py`). Never lower it; raise it as tests
+  land. The number lives in exactly two places that must stay in sync:
+  `.github/workflows/ci.yml` (job `verify`) and the Makefile `coverage` target.
+- Local mirror: `make coverage` (same flags, same number).
+- Tooling pin: `pytest-cov==7.1.0` in `requirements.txt` (matches the installed
+  workspace version) so CI and local measure identically. Bump the pin and the
+  gate in the same change only if the measurement is re-baselined first.
+- Comparison semantics: coverage.py compares against the total rounded per the
+  default precision (whole numbers), so a true 35.5–36.49% reads as "36" and
+  passes; anything under 35.5% fails the job.
+
+After adding tests, check whether the floor can rise:
+
+```bash
+make coverage        # read the TOTAL line, then raise both fail-under numbers
+```
+
+Branch protection from §4 stays as-is: required check is `verify` only. The
+ratchet rides inside `verify`, so no extra check name is needed.
+
+## 8. Weekly live-portal smoke (RL5)
+
+Job `weekly-live` in `.github/workflows/ci.yml` runs the real-county-site tier
+(`test_live_portals.py`: Collin Clerk search + lien stack, DCAD property parse,
+Grayson registry consistency) so portal markup breakage is caught by CI instead
+of human memory.
+
+- **Triggers:** weekly cron (`0 13 * * 1`, Mondays ~8am Dallas time) plus manual
+  **Run workflow** (`workflow_dispatch`) for on-demand checks. It also runs on
+  push/schedule like any job, but its `if:` gates execution to those two events,
+  so ordinary PRs and pushes are unaffected and merges never depend on county
+  sites being up.
+- **Environment:** installs `requirements.txt` plus Playwright's browser via
+  `playwright install chromium --with-deps`.
+- **Retargeting without code edits:** set repo Variables (**Settings → Secrets
+  and variables → Actions → Variables**) `HERMES_TEST_PARTY` /
+  `HERMES_TEST_ADDRESS`; they pass through to the job, which falls back to the
+  same defaults as `test_live_portals.py` when unset.
+- **Local equivalent:** `make test-live`. Note it names the module explicitly
+  (`pytest test_live_portals.py -m live`): `pytest.ini` sets `testpaths = tests`
+  while the live tier lives at repo root, so bare `pytest -m live` collects
+  nothing and exits 5. The same explicit invocation is used in CI.
+- **On red:** a failed `weekly-live` run means an adapter or portal surface
+  drifted (HTTP shape, selectors, endpoints). Check `SOURCE_REGISTRY.md` first,
+  then the adapter named in the failing test. It does not block merges, but fix
+  before the next release cut (§6).

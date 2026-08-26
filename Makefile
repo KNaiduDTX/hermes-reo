@@ -6,7 +6,7 @@ RUFF     := .venv/bin/ruff
 SOFFICE  := /Applications/LibreOffice.app/Contents/MacOS/soffice
 XLSX     := out/HERMES-REO_Model_Suite.xlsx
 
-.PHONY: help setup lock lint lint-full test test-live checks fixture build recalc verify ci-local all clean
+.PHONY: help setup lock lint lint-full test test-live coverage checks fixture build recalc verify ci-local all clean
 
 help:
 	@echo "make setup    - create venv + install pinned deps + playwright browser"
@@ -15,6 +15,7 @@ help:
 	@echo "make lint-full- full ruff with style rules"
 	@echo "make test     - pytest, excluding live/recalc (no network needed)"
 	@echo "make test-live- pytest live-portal tier (hits real county sites)"
+	@echo "make coverage - pytest + coverage ratchet (CI parity; ONLY-INCREASES)"
 	@echo "make checks   - run all module self-checks (offline, exits nonzero on fail)"
 	@echo "make fixture  - offline end-to-end pipeline into data/fixtures/"
 	@echo "make build    - rebuild the Excel workbook"
@@ -41,8 +42,16 @@ lint-full:
 test:
 	$(PY) -m pytest
 
+# Live tier module sits at repo root while pytest.ini sets `testpaths = tests`,
+# so bare `pytest -m live` would collect nothing (exit 5) — the module is named
+# explicitly. CLI `-m live` overrides the default addopts filter for this run.
 test-live:
-	$(PY) -m pytest -m live
+	$(PY) -m pytest test_live_portals.py -m live
+
+# FN6 ratchet mirror of ci.yml job `verify`: same flags, same number.
+# ONLY-INCREASES: never lower --cov-fail-under; raise it as coverage grows.
+coverage:
+	$(PY) -m pytest --cov=src --cov=server --cov-report=term-missing --cov-fail-under=36
 
 checks:
 	$(PY) pipeline.py --checks-only
