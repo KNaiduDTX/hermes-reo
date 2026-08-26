@@ -17,6 +17,10 @@ R3 cache contract:
   survive a save, so failures are always re-searched on the next run.
 - TTL of 90 days: entries older than that (or missing a usable timestamp)
   are treated as cache misses and re-searched.
+- Concurrency (RL10): the whole load -> search -> save cycle runs under an
+  exclusive file_lock on the "<cache>.lock" sidecar so two concurrent
+  processes queue instead of dropping each other's freshly searched entries;
+  contention beyond the scaled wait surfaces as TimeoutError("LOCK-BUSY ...").
 """
 from __future__ import annotations
 import asyncio
@@ -28,7 +32,7 @@ from datetime import date, datetime, timedelta, timezone
 from typing import Optional
 
 from ..dates import parse_date_any
-from ..io_utils import write_json
+from ..io_utils import file_lock, write_json
 from .dallas_cad import DallasCADAdapter, _search_dcad_by_address, _parse_dcad_detail
 from .base import SourceProvenance
 
@@ -44,6 +48,19 @@ CACHE_TTL_DAYS = 90   # R3: stale entries are treated as misses
 # ({"status": "error"}, transport exceptions, timeouts, ...) is transient and
 # must be retried on the next run, never cached.
 _CACHEABLE_STATUSES = frozenset({"parsed", "no_data_found", "mismatch"})
+
+# RL10: batch_cross_reference holds an exclusive file_lock across its whole
+# load -> search -> save cycle. A batch may legitimately hold the lock for up
+# to ~batch_limit searches spaced RATE_LIMIT_SEC apart, so scale the wait with
+# the batch size instead of using file_lock's short 10s default — a concurrent
+# legitimate run queues and then re-reads a fresh cache; only genuinely stuck
+# contention surfaces as TimeoutError("LOCK-BUSY ...").
+BULK_LOCK_TIMEOUT_FLOOR_SEC = 30.0
+
+
+def _cache_lock_timeout(batch_limit: int) -> float:
+    """Lock wait long enough for one full competing batch to finish first."""
+    return max(BULK_LOCK_TIMEOUT_FLOOR_SEC, 2.0 * int(batch_limit) * RATE_LIMIT_SEC)
 
 
 def _utc_now_iso() -> str:
@@ -151,10 +168,17 @@ def batch_cross_reference(addresses: list[str], batch_limit: int = 50) -> dict:
 
     Uses cache to skip already-searched addresses.
     Returns dict of {address: DCAD result}.
+
+    RL10: the load -> search -> save sequence runs inside an exclusive
+    file_lock on the cache sidecar so concurrent processes cannot overwrite
+    each other's freshly searched entries (lost-update bug). On contention
+    that outlasts the scaled timeout this raises TimeoutError("LOCK-BUSY ...")
+    instead of silently dropping writes.
     """
-    cache = _load_cache()
-    cache = asyncio.run(_batch_search(addresses, cache, batch_limit))
-    return cache
+    with file_lock(CACHE_PATH, timeout=_cache_lock_timeout(batch_limit)):
+        cache = _load_cache()
+        cache = asyncio.run(_batch_search(addresses, cache, batch_limit))
+        return cache
 
 
 def get_cached_result(address: str) -> Optional[dict]:
