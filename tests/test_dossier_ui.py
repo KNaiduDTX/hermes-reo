@@ -5,15 +5,23 @@
 ledger modal markup/ids, and a 404 for an unknown parcel.
 """
 import json
+import os
 import re
 from pathlib import Path
 
+import pytest
 from fastapi.testclient import TestClient
 
 import dashboard
 
 ROOT = Path(__file__).resolve().parent.parent
-CPR = json.loads((ROOT / "data" / "cpr_4003592.json").read_text(encoding="utf-8"))
+_CPR_PATH = ROOT / "data" / "cpr_4003592.json"
+
+if not _CPR_PATH.exists():
+    # data/ is gitignored — CI and fresh clones have no scraped dataset.
+    pytest.skip("data/cpr_4003592.json not present", allow_module_level=True)
+
+CPR = json.loads(_CPR_PATH.read_text(encoding="utf-8"))
 
 
 def client() -> TestClient:
