@@ -264,3 +264,9 @@ Timezone-aware provenance timestamps (6 sites); M6 deal-type-aware lien-survival
 **Live re-measure after all fixes:** purge + bounded rerun → +2 CPRs enriched (8 fields); remaining re-fetch failures are genuine wrong-first-result ambiguity → queued for `--resolve`. Cache lifetime: 71 attempted / 26 parsed.
 
 **Gates:** lint ✓ · 171 tests ✓ · self-checks ✓ · fixture ✓ · workbook ✓ · recalc ✓ · live 3/3 ✓ · hooks active ✓
+
+## CI LIVE + GEOCODE HARVEST — Aug 26, 2026
+- **GitHub remote live**: `KNaiduDTX/hermes-reo` (private); 35 commits pushed; Actions running the full verify pipeline on every push.
+- **CI caught real drift immediately**: fastapi/uvicorn missing from requirements (worked locally, broke remotely), plus two environment-portability assumptions in tests (hardcoded .venv path; data/-dependent assertions). All fixed; pipeline green: lint → 171 tests → self-checks → fixture → workbook build in ~25s.
+- **Geocode harvest**: address normalization flipped Census success from ~4% to ~90%+ per batch → **115/338 records geocoded** (0 at session start); negative-cache ledger holds 9 repeat-offenders; batches now terminate when only stragglers remain.
+- **Map artifact refreshed**: live_foreclosures.geojson 30 features, all with real coordinates.
