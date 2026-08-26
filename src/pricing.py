@@ -7,10 +7,13 @@ of producing a $0-or-negative "offer"). The sensitivity grid classifies each
 deal as base / optimistic_only / never_pencils / unknown (fake-signal tells).
 """
 from __future__ import annotations
+import csv
+import io
 import math
 from dataclasses import dataclass, field
-from typing import Optional
-from .cpr import CPR, CPRColumn, BlastTier, LienRecord
+from typing import Any, Iterable, Optional
+from .cpr import CPR, CPRColumn, BlastTier, LienRecord, pv_value
+from .legal_rules import is_comp_source_rejected
 from .underwriting import mao, wholesale_mao
 from . import policy
 
@@ -270,6 +273,93 @@ def price_deal(cpr: CPR, arv: float, rehab: float, deal_type: str = "DT-AUCTION"
     return result
 
 
+# --- F5-lite: batch pricing over valued CPRs ------------------------------
+# Column order for batch rows and the CSV header — single source of truth so
+# to_csv() can never drift from what batch_price() emits.
+BATCH_ROW_FIELDS = ("parcel_id", "mao", "bid_ceiling", "offer",
+                    "dead_reason", "pencil_status")
+
+
+def _cpr_deal_type(cpr: CPR) -> str:
+    """Best-effort deal type off a CPR, tolerating str/enum/ProvenanceField."""
+    raw = pv_value(getattr(cpr, "deal_type", "") or "")
+    return str(getattr(raw, "value", raw) or "")
+
+
+def batch_price(cprs: Iterable[CPR],
+                comp_source_default: str = "mls_agent",
+                rehab: float = 0.0,
+                factor: float = policy.MAO_FACTOR_DEFAULT,
+                cash_available: float = float("inf"),
+                seller_posture: str = "standard",
+                capital_at_risk: float = 0.0,
+                default_deal_type: str = "DT-AUCTION") -> list[dict[str, Any]]:
+    """Price every VALUED CPR in a batch; skip everything else (F5-lite).
+
+    A CPR is priced only when its attached valuation carries
+    ``gate_val_verdict == "pass"`` AND a grounded ARV — exactly the records
+    GATE-VAL promoted. Anything HITL/failing/unvalued is skipped outright:
+    a batch investor pack must never contain numbers priced off CAD guesses
+    or rejected comp sources.
+
+    ``comp_source_default`` (F5-lite) is the provenance assumed when a valued
+    valuation records no ``comp_source`` of its own (e.g., a partially
+    rehydrated record). If the effective source — recorded or defaulted — is
+    one of legal_rules' rejected fake-signal sources, the row is skipped even
+    when the verdict says "pass": fail closed on fabricated provenance.
+
+    Each priced row is a plain dict keyed by BATCH_ROW_FIELDS:
+    {parcel_id, mao, bid_ceiling, offer, dead_reason, pencil_status}. Dead
+    deals still appear (dead_reason set, offer None) — they were valued and
+    priced; they just have nothing left to bid. Skipped CPRs do not appear
+    at all. Side effect: price_deal advances each priced CPR's Kanban column
+    and blast tier exactly as the single-deal path does.
+    """
+    rows: list[dict[str, Any]] = []
+    for cpr in cprs:
+        val = getattr(cpr, "valuation", None)
+        verdict = getattr(val, "gate_val_verdict", "") if val is not None else ""
+        arv = pv_value(val.arv) if (val is not None and val.arv is not None) else None
+        if verdict != "pass" or arv is None:
+            continue  # not valued -> not priced, no fake numbers
+        recorded_source = pv_value(getattr(val, "comp_source", "") or "")
+        effective_source = str(recorded_source or comp_source_default)
+        if is_comp_source_rejected(effective_source):
+            # Fail closed: a "pass" verdict riding on rejected provenance
+            # (tampered/stale rehydration) must not reach the investor pack.
+            continue
+        result = price_deal(
+            cpr, arv=float(arv), rehab=rehab,
+            deal_type=_cpr_deal_type(cpr) or default_deal_type,
+            factor=factor, cash_available=cash_available,
+            seller_posture=seller_posture, capital_at_risk=capital_at_risk,
+        )
+        rows.append({
+            "parcel_id": cpr.parcel_id,
+            "mao": result.mao,
+            "bid_ceiling": result.bid_ceiling,
+            "offer": result.offer,
+            "dead_reason": result.dead_reason,
+            "pencil_status": result.pencil_status,
+        })
+    return rows
+
+
+def to_csv(rows: Optional[list[dict[str, Any]]]) -> str:
+    """Render batch_price() rows as CSV text: header + one line per row.
+
+    None values (dead deals' missing offers/reasons) serialize as empty
+    cells; an empty/None rows input yields just the header line.
+    """
+    buf = io.StringIO()
+    writer = csv.writer(buf)
+    writer.writerow(BATCH_ROW_FIELDS)
+    for row in rows or []:
+        writer.writerow(
+            ["" if row.get(k) is None else row.get(k) for k in BATCH_ROW_FIELDS])
+    return buf.getvalue()
+
+
 if __name__ == "__main__":
     # Self-check: MAO + bid ceiling + pencil classification + dead-deal handling
     from .cpr import CPR, LienRecord
@@ -389,6 +479,78 @@ if __name__ == "__main__":
     _check("tier T2 at $50k risk", assign_blast_tier(50_000) == BlastTier.T2)
     _check("tier T3 at $200k risk", assign_blast_tier(200_000) == BlastTier.T3)
 
+    # --- F5-lite: batch pricing skips non-valued CPRs ---
+    from datetime import datetime, timedelta, timezone
+    from .cpr import CompRecord
+    from .valuation import gate_val
+
+    _today = datetime.now(timezone.utc).date()
+
+    def _make_valued(parcel_id: str) -> CPR:
+        """Synthesize a GATE-VAL-passed CPR: 3 fresh, close, adjusted comps."""
+        c = CPR(parcel_id=parcel_id, county="collin",
+                situs_address=f"1 Batch St {parcel_id}")
+        comps = [CompRecord(address=f"{100 + i} Neighbor Ct",
+                            sale_price=300_000 + i * 10_000,
+                            adjusted_price=301_000 + i * 10_000,
+                            distance_miles=0.2 + 0.05 * i,
+                            source="mls_agent",
+                            sale_date=(_today - timedelta(days=20 + i)).isoformat())
+                 for i in range(3)]
+        gate, val_obj = gate_val(c, "mls_agent", comps, BlastTier.T1)
+        assert gate.verdict == "pass", gate.reason
+        c.valuation = val_obj
+        return c
+
+    _valued_alive = _make_valued("BATCH-A")
+    _valued_dead = _make_valued("BATCH-DEAD")
+    _valued_dead.add_lien(LienRecord(lien_type="irs_federal", amount=500_000,
+                                     survives_foreclosure=True), "test")
+    _never_valued = CPR(parcel_id="BATCH-SKIP", county="collin")
+    _hitl_only = _make_valued("BATCH-HITL")
+    _hitl_only.valuation.gate_val_verdict = "hitl"
+
+    rows = batch_price([_valued_alive, _never_valued, _hitl_only, _valued_dead])
+    _check("batch prices only GATE-VAL-passed CPRs",
+           [r["parcel_id"] for r in rows] == ["BATCH-A", "BATCH-DEAD"])
+    _check("batch rows carry exactly the contract fields",
+           all(tuple(r.keys()) == BATCH_ROW_FIELDS for r in rows))
+    _arv_batch = 311_000.0  # median of the three adjusted comps
+    _check("batch MAO priced off the gated ARV",
+           abs(rows[0]["mao"] - (_arv_batch * policy.MAO_FACTOR_DEFAULT)) < 1e-9)
+    _check("alive batch row: offer set, no dead reason, pencils at base",
+           rows[0]["offer"] is not None and rows[0]["dead_reason"] is None
+           and rows[0]["pencil_status"] == PENCIL_BASE)
+    _check("dead batch row: ceiling 0, offer None, reason stamped",
+           rows[1]["bid_ceiling"] == 0 and rows[1]["offer"] is None
+           and rows[1]["dead_reason"] == DEAD_BID_CEILING_NONPOSITIVE)
+
+    # F5-lite: comp_source_default — rejected provenance fails closed even
+    # when a stale record still claims "pass"; an unrecorded source falls
+    # back to the mls_agent default instead of blocking the row.
+    _bad_src = _make_valued("BATCH-BADSRC")
+    _bad_src.valuation.comp_source = "zestimate"   # rejected fake-signal source
+    _no_src = _make_valued("BATCH-NOSRC")
+    _no_src.valuation.comp_source = ""             # rehydrated w/o provenance
+
+    rows_src = batch_price([_bad_src, _no_src])
+    _check("batch skips 'pass' verdict riding on rejected comp source",
+           [r["parcel_id"] for r in rows_src] == ["BATCH-NOSRC"])
+    _check("unrecorded comp source falls back to comp_source_default",
+           len(rows_src) == 1
+           and abs(rows_src[0]["mao"]
+                   - (_arv_batch * policy.MAO_FACTOR_DEFAULT)) < 1e-9)
+
+    csv_text = to_csv(rows)
+    csv_lines = list(csv.reader(csv_text.splitlines()))
+    _check("csv header matches BATCH_ROW_FIELDS",
+           tuple(csv_lines[0]) == BATCH_ROW_FIELDS)
+    _check("csv has one line per row plus header",
+           len(csv_lines) == len(rows) + 1)
+    _dead_line = next(l for l in csv_lines[1:] if l[0] == "BATCH-DEAD")
+    _check("csv serializes dead-deal offer/reason as empty cells",
+           _dead_line[BATCH_ROW_FIELDS.index("offer")] == ""
+           and _dead_line[BATCH_ROW_FIELDS.index("pencil_status")] != "")
     print(f"\npricing.py: MAO=${result.mao:,.0f}, ceiling=${result.bid_ceiling:,.0f}, "
           f"tier={result.blast_tier.name}, pencil={result.pencil_status}")
     print(f"  ladder: open=${result.offer_ladder['opening']:,.0f}, "

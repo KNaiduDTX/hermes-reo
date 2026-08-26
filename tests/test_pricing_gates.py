@@ -128,3 +128,138 @@ def test_flip_still_pencils_on_sane_inputs():
                   holding=5_000, financing=10_000, closing_buy=5_000,
                   closing_sell=24_000)
     assert uw.net_profit > 0
+
+
+# --- F5-lite: batch pricing over valued CPRs -------------------------------
+
+def _valued_cpr(parcel_id: str, county: str = "collin"):
+    """Synthesize a GATE-VAL-passed CPR: 3 fresh, close, adjusted MLS comps."""
+    from datetime import datetime, timedelta, timezone
+
+    from src.cpr import BlastTier, CompRecord
+    from src.valuation import attach_valuation, gate_val
+
+    cpr = CPR(parcel_id=parcel_id, county=county,
+              situs_address=f"1 Batch St {parcel_id}")
+    today = datetime.now(timezone.utc).date()
+    comps = [
+        CompRecord(address=f"{100 + i} Neighbor Ct",
+                   sale_price=300_000 + i * 10_000,
+                   adjusted_price=301_000 + i * 10_000,
+                   distance_miles=0.2 + 0.05 * i,
+                   source="mls_agent",
+                   sale_date=(today - timedelta(days=20 + i)).isoformat())
+        for i in range(3)
+    ]
+    gate, val_obj = gate_val(cpr, "mls_agent", comps, BlastTier.T2)
+    assert gate.verdict == "pass", gate.reason
+    attach_valuation(cpr, val_obj, gate)
+    return cpr
+
+
+# Median of the synthesized comp set's adjusted prices (301k/311k/321k).
+BATCH_ARV = 311_000.0
+
+
+def test_batch_price_prices_only_valued_cprs():
+    from src.pricing import BATCH_ROW_FIELDS, batch_price
+
+    alive = _valued_cpr("B1")
+    dead = _valued_cpr("D1")
+    dead.add_lien(LienRecord(lien_type="irs_federal", amount=500_000,
+                             survives_foreclosure=True), "test")
+    never_valued = CPR(parcel_id="S1", county="collin")  # no valuation at all
+    hitl_only = _valued_cpr("H1")
+    hitl_only.valuation.gate_val_verdict = "hitl"  # GATE-VAL did NOT pass
+
+    rows = batch_price([alive, never_valued, hitl_only, dead])
+    # Non-valued CPRs are skipped outright — no rows, no fabricated numbers.
+    assert [r["parcel_id"] for r in rows] == ["B1", "D1"]
+    assert all(tuple(r.keys()) == BATCH_ROW_FIELDS for r in rows)
+
+    b1 = rows[0]
+    assert b1["mao"] == pytest.approx(BATCH_ARV * 0.70)  # rehab defaults to 0
+    assert b1["bid_ceiling"] == pytest.approx(b1["mao"])  # no liens, inf cash
+    assert b1["dead_reason"] is None
+    assert b1["offer"] is not None
+    assert b1["pencil_status"] == PENCIL_BASE
+
+    d1 = rows[1]
+    assert d1["bid_ceiling"] == 0
+    assert d1["offer"] is None
+    assert d1["dead_reason"] is not None
+
+
+def test_batch_price_skips_rejected_comp_source_despite_pass_verdict():
+    """F5-lite fail-closed: 'pass' riding rejected provenance is not priced."""
+    from src.pricing import batch_price
+
+    cpr = _valued_cpr("BADSRC")
+    cpr.valuation.comp_source = "zestimate"  # rejected fake-signal source
+    assert batch_price([cpr]) == []
+
+
+def test_batch_price_falls_back_to_comp_source_default():
+    """F5-lite: an unrecorded source assumes comp_source_default (approved)."""
+    from src.pricing import BATCH_ROW_FIELDS, batch_price
+
+    cpr = _valued_cpr("NOSRC")
+    cpr.valuation.comp_source = ""  # e.g. partially rehydrated record
+    rows = batch_price([cpr], comp_source_default="mls_agent")
+    assert [r["parcel_id"] for r in rows] == ["NOSRC"]
+    assert all(tuple(r.keys()) == BATCH_ROW_FIELDS for r in rows)
+    assert rows[0]["mao"] == pytest.approx(BATCH_ARV * 0.70)
+
+
+def test_batch_price_respects_per_cpr_deal_type_for_lien_survival():
+    """M6 threading: a DT-TAXDEED-valued CPR ignores foreclosure-only liens."""
+    from src.pricing import batch_price
+
+    cpr = _valued_cpr("TD1", county="dallas")
+    cpr.deal_type = "DT-TAXDEED"
+    cpr.add_lien(LienRecord(lien_type="irs_federal", amount=500_000,
+                            survives_foreclosure=True,
+                            survives_tax_sale=False), "test")
+
+    (row,) = batch_price([cpr])
+    assert row["bid_ceiling"] > 0 and row["dead_reason"] is None
+
+
+def test_to_csv_renders_header_and_rows_with_empty_dead_cells():
+    import csv as csv_mod
+    import io as io_mod
+
+    from src.pricing import (BATCH_ROW_FIELDS,
+                             DEAD_BID_CEILING_NONPOSITIVE,
+                             batch_price,
+                             to_csv)
+
+    alive = _valued_cpr("C1")
+    dead = _valued_cpr("C2")
+    dead.add_lien(LienRecord(lien_type="irs_federal", amount=900_000,
+                             survives_foreclosure=True), "test")
+    rows = batch_price([alive, dead])
+
+    text = to_csv(rows)
+    lines = list(csv_mod.reader(io_mod.StringIO(text)))
+    assert lines[0] == list(BATCH_ROW_FIELDS)
+    assert len(lines) == len(rows) + 1
+    by_parcel = {r[0]: r for r in lines[1:]}
+
+    alive_row = by_parcel["C1"]
+    assert float(alive_row[BATCH_ROW_FIELDS.index("mao")]) == pytest.approx(
+        BATCH_ARV * 0.70)
+
+    dead_row = by_parcel["C2"]
+    assert dead_row[BATCH_ROW_FIELDS.index("offer")] == ""  # None -> empty cell
+    assert float(dead_row[BATCH_ROW_FIELDS.index("bid_ceiling")]) == 0.0
+    assert (dead_row[BATCH_ROW_FIELDS.index("dead_reason")]
+            == DEAD_BID_CEILING_NONPOSITIVE)
+
+
+def test_to_csv_empty_rows_yields_header_only():
+    from src.pricing import BATCH_ROW_FIELDS, to_csv
+
+    text = to_csv([])
+    assert text.strip() == ",".join(BATCH_ROW_FIELDS)
+    assert to_csv(None) == text
