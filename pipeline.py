@@ -31,6 +31,7 @@ import time
 from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timedelta, timezone
 import logging
+from typing import TYPE_CHECKING
 
 # Ensure src is importable
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
@@ -38,6 +39,13 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from src.addr import is_plausible_street_address, to_census_one_line  # shared outbound-query normalizer
 from src.io_utils import write_json, write_text  # atomic crash-safe writers (shared contract)
 from src import policy  # B4: single source of truth for decision-policy constants
+
+if TYPE_CHECKING:
+    from collections.abc import Callable
+
+    from src.cpr import CPR, ValuationObject
+    from src.compliance import GateResult
+    from src.valuation import GateValResult
 
 CHECK_TIMEOUT_SECONDS = 120
 CHECK_WORKERS = 4
@@ -136,15 +144,16 @@ class RunSummary:
     """
 
     def __init__(self, mode: str, flags: dict | None = None,
-                 path: str = RUN_SUMMARY_PATH, now_fn=_utc_now):
+                 path: str = RUN_SUMMARY_PATH,
+                 now_fn: Callable[[], datetime] = _utc_now):
         self.mode = mode
         self.flags = dict(flags or {})
         self.path = path
         self.now_fn = now_fn
         self.started_at = now_fn()
-        self._counts: dict[str, dict] = {}
+        self._counts: dict[str, dict[str, int]] = {}
 
-    def source(self, name: str) -> dict:
+    def source(self, name: str) -> dict[str, int]:
         """Zeroed count row for *name*, auto-created."""
         return self._counts.setdefault(name, {k: 0 for k in SUMMARY_COUNT_KEYS})
 
@@ -175,16 +184,16 @@ class RunSummary:
         return self.path
 
 
-def _iso_week_label(now_fn=_utc_now) -> str:
+def _iso_week_label(now_fn: Callable[[], datetime] = _utc_now) -> str:
     """ISO-8601 week tag for digest filenames, e.g. '2026-W35'."""
     iso = now_fn().isocalendar()
     return f"{iso[0]}-W{iso[1]:02d}"
 
 
-def write_weekly_digest(cprs: list, output_dir: str,
+def write_weekly_digest(cprs: list[CPR], output_dir: str,
                         filename_prefix: str = "",
                         dead_reasons: dict | None = None,
-                        now_fn=_utc_now) -> str:
+                        now_fn: Callable[[], datetime] = _utc_now) -> str:
     """F9: render src.synthesis.weekly_digest and write it atomically.
 
     weekly_digest(cprs, dead_reasons=None) is standalone-friendly — it needs
@@ -201,7 +210,7 @@ def write_weekly_digest(cprs: list, output_dir: str,
 
 def run_all_checks() -> bool:
     """Run all module self-checks concurrently. Returns True if all pass."""
-    def _check(mod: str):
+    def _check(mod: str) -> tuple[str, int, str]:
         try:
             proc = subprocess.run(
                 [sys.executable, "-m", mod],
@@ -248,7 +257,7 @@ def _clean_owner_name(owner_raw: str) -> str:
     return " ".join(parts[:2]).upper()
 
 
-def _clerk_lien_search(cpr) -> None:
+def _clerk_lien_search(cpr: CPR) -> None:
     """Collin County clerk lien lookup, merged into the CPR encumbrance stack.
 
     Loud-failure contract (audit S7/E1): success sets cpr.lien_lookup_status='ok'
@@ -281,7 +290,7 @@ def _clerk_lien_search(cpr) -> None:
         print(f"CLERK-LOOKUP-FAILED: {exc!r}", file=sys.stderr)
 
 
-def _dcad_xref(cpr):
+def _dcad_xref(cpr: CPR) -> CPR:
     """Dallas CAD cross-reference with loud failure semantics."""
     from src.enrichment import cross_reference_dcad
     try:
@@ -300,7 +309,7 @@ def _dcad_xref(cpr):
     return cpr
 
 
-def _effective_lien_gate(cpr):
+def _effective_lien_gate(cpr: CPR) -> tuple[GateResult, bool]:
     """GATE-LEGAL-LIEN with lookup-error semantics (audit S7).
 
     Returns (gate_result, lookup_caused). An errored lien lookup forces verdict
@@ -339,12 +348,12 @@ def _print_gate_block_banner(verdict: str, reason: str, lookup_caused: bool) -> 
 DEFAULT_REHAB_ESTIMATE = 50_000  # quick-quote rehab (2004 build, ~4,300 sqft)
 
 
-def process_valued_cpr(cpr, rehab: float = DEFAULT_REHAB_ESTIMATE,
+def process_valued_cpr(cpr: CPR, rehab: float = DEFAULT_REHAB_ESTIMATE,
                        output_dir: str | None = None,
                        artifact_prefix: str = "",
                        summary: "RunSummary | None" = None,
                        source_label: str = "fixture",
-                       gate_val_result=None) -> dict | None:
+                       gate_val_result: GateValResult | None = None) -> dict | None:
     """Steps 5–8 of the spine for a VALUED CPR — the shared pipeline tail.
 
     F1: extracted verbatim from run_fixture_pipeline so BOTH the offline
@@ -493,7 +502,7 @@ DATASET_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)),
                             "data", "current_deals.json")
 
 
-def restore_serialized_valuation(raw: dict):
+def restore_serialized_valuation(raw: dict) -> ValuationObject | None:
     """Rebuild the ValuationObject that src.hitl.load_cpr deliberately drops.
 
     load_cpr ignores any stored valuation by contract ("the HITL run replaces
@@ -541,7 +550,7 @@ def restore_serialized_valuation(raw: dict):
     )
 
 
-def _stamp_val_gate(records: list, county: str, address: str,
+def _stamp_val_gate(records: list[dict], county: str, address: str,
                     value: str = "pass") -> int:
     """Stamp *value* onto dataset rows matching this parcel's identity.
 
@@ -565,7 +574,7 @@ def _stamp_val_gate(records: list, county: str, address: str,
     return stamped
 
 
-def _resume_stamp_dataset(cpr, dataset_path: str) -> int:
+def _resume_stamp_dataset(cpr: CPR, dataset_path: str) -> int:
     """Atomically stamp val_gate='pass' on *cpr*'s row in current_deals.json."""
     if not os.path.exists(dataset_path):
         print(f"  Dataset not found at {dataset_path} — val_gate stamp skipped")
@@ -584,7 +593,8 @@ def _resume_stamp_dataset(cpr, dataset_path: str) -> int:
 
 def run_resume_valued_pipeline(valued_path: str,
                                rehab: float = DEFAULT_REHAB_ESTIMATE,
-                               summary=None, output_dir: str | None = None,
+                               summary: RunSummary | None = None,
+                               output_dir: str | None = None,
                                dataset_path: str | None = None) -> int:
     """F1: close the HITL loop — finish one valued CPR end-to-end.
 
@@ -666,7 +676,8 @@ def run_resume_valued_pipeline(valued_path: str,
     return EXIT_OK
 
 
-def run_fixture_pipeline(allow_gate_fail_demo: bool = False, summary=None):
+def run_fixture_pipeline(allow_gate_fail_demo: bool = False,
+                         summary: RunSummary | None = None) -> None:
     """Run the full pipeline on fixture data.
 
     Uses the verified Collin County parcel from lucid-noether (entry_id 4003592).
@@ -843,7 +854,7 @@ def run_fixture_pipeline(allow_gate_fail_demo: bool = False, summary=None):
     print("=" * 70)
 
 
-def _print_grayson_degradation(exc) -> None:
+def _print_grayson_degradation(exc: BaseException | None) -> None:
     """F10: loud, honest notice that Grayson tax-sale sources are unreachable.
 
     The adapter swallows transport errors and returns [] — an empty pull from
@@ -865,7 +876,8 @@ LIVE_SOURCE_NAMES = {
 
 def run_live_pipeline(county: str, limit: int, allow_gate_fail_demo: bool = False,
                       min_leads: int = 0, force_dead_errors: bool = False,
-                      summary=None, output_dir: str | None = None):
+                      summary: RunSummary | None = None,
+                      output_dir: str | None = None) -> None:
     """Run the pipeline on live data from the specified county.
 
     Opt-in only (--live). Outputs keep production names and are written through
@@ -1037,8 +1049,8 @@ DCAD_WRITEBACK_FIELDS = (
 DCAD_SUMMARY_SOURCE = "dcad_bulk"
 
 
-def _write_back_dcad_fields(records: list[dict], dallas_cprs: list,
-                            pre_xref: dict) -> tuple[int, int]:
+def _write_back_dcad_fields(records: list[dict], dallas_cprs: list[CPR],
+                            pre_xref: dict[int, dict]) -> tuple[int, int]:
     """B2: merge this run's DCAD enrichment into the parsed dataset records.
 
     For each CPR enriched THIS RUN (value changed vs the pre-xref snapshot),
@@ -1074,7 +1086,7 @@ def _write_back_dcad_fields(records: list[dict], dallas_cprs: list,
     return records_updated, fields_written
 
 
-def _run_bulk_dcad(summary=None):
+def _run_bulk_dcad(summary: RunSummary | None = None) -> None:
     """Run DCAD bulk cross-reference on all Dallas CPRs from current_deals.json.
 
     Uses the batch adapter with JSON cache (data/dcad_cache.json) and 2s rate limiting.
@@ -1189,7 +1201,7 @@ GEOCODE_FAILURE_TTL_DAYS = 7  # ...until its newest failure goes stale
 GEOCODE_SUMMARY_SOURCE = "census_geocode"
 
 
-def _parse_ledger_ts(value) -> datetime | None:
+def _parse_ledger_ts(value: object) -> datetime | None:
     """Parse a ledger ISO timestamp; naive values are read as UTC."""
     try:
         ts = datetime.fromisoformat(str(value))
@@ -1210,7 +1222,7 @@ def geocode_failure_key(address: str) -> str:
     return hashlib.sha1(query.encode("utf-8")).hexdigest()[:16]
 
 
-def load_geocode_failures(path: str = GEOCODE_LEDGER_PATH) -> dict:
+def load_geocode_failures(path: str = GEOCODE_LEDGER_PATH) -> dict[str, dict]:
     """Load the failure ledger tolerantly: missing/corrupt -> fresh {}."""
     try:
         with open(path) as f:
@@ -1236,8 +1248,8 @@ def load_geocode_failures(path: str = GEOCODE_LEDGER_PATH) -> dict:
     return ledger
 
 
-def record_geocode_failure(ledger: dict, address: str, status: str,
-                           now_fn=_utc_now) -> None:
+def record_geocode_failure(ledger: dict[str, dict], address: str, status: str,
+                           now_fn: Callable[[], datetime] = _utc_now) -> None:
     """Bump the failure tally for *address* in place (mutates *ledger*)."""
     entry = ledger.setdefault(geocode_failure_key(address), {"attempts": 0})
     entry["attempts"] = int(entry.get("attempts", 0)) + 1
@@ -1245,13 +1257,13 @@ def record_geocode_failure(ledger: dict, address: str, status: str,
     entry["last_at"] = now_fn().isoformat()
 
 
-def clear_geocode_failure(ledger: dict, address: str) -> None:
+def clear_geocode_failure(ledger: dict[str, dict], address: str) -> None:
     """A successful geocode forgives: drop the address from the ledger."""
     ledger.pop(geocode_failure_key(address), None)
 
 
 def should_skip_geocode(entry: dict | None, retry_failed: bool = False,
-                        now_fn=_utc_now) -> bool:
+                        now_fn: Callable[[], datetime] = _utc_now) -> bool:
     """True when a previously-failed address must sit this invocation out.
 
     Skip iff attempts >= GEOCODE_MAX_ATTEMPTS AND the newest failure is
@@ -1270,10 +1282,12 @@ def should_skip_geocode(entry: dict | None, retry_failed: bool = False,
     return timedelta(0) <= age < timedelta(days=GEOCODE_FAILURE_TTL_DAYS)
 
 
-def select_geocode_targets(missing_records: list[dict], ledger: dict,
+def select_geocode_targets(missing_records: list[dict],
+                           ledger: dict[str, dict],
                            cap: int = GEOCODE_BACKFILL_CAP,
                            retry_failed: bool = False,
-                           now_fn=_utc_now) -> tuple[list[dict], dict]:
+                           now_fn: Callable[[], datetime] = _utc_now
+                           ) -> tuple[list[dict], dict]:
     """Partition missing-coordinate records into this run's geocode targets.
 
     Implausible addresses are never queried; previously-failed addresses
@@ -1314,7 +1328,7 @@ def _record_missing_coords(record: dict) -> bool:
 def _run_geocode_backfill(dry_run: bool = False,
                           cap: int = GEOCODE_BACKFILL_CAP,
                           retry_failed: bool = False,
-                          summary=None):
+                          summary: RunSummary | None = None) -> None:
     """B3: backfill missing coordinates in current_deals.json via Census.
 
     Strictly OPT-IN (--geocode-backfill): performs network calls against
@@ -1465,7 +1479,7 @@ def _run_geocode_backfill(dry_run: bool = False,
         print(f"  Failure tally: {tally}")
 
 
-def _mode_identity(args) -> tuple[str, dict]:
+def _mode_identity(args: argparse.Namespace) -> tuple[str, dict]:
     """Map parsed CLI args to (run_summary mode, flags payload).
 
     RL4: keeps the summary's mode/flags vocabulary in one place; values are
@@ -1491,7 +1505,7 @@ def _mode_identity(args) -> tuple[str, dict]:
     return "hint", {}  # bare invocation (handled before this in main())
 
 
-def main():
+def main() -> None:
     # Library modules (src/**) log via logging; surface on stderr.
     logging.basicConfig(level=logging.INFO,
                         format="%(levelname)s %(name)s: %(message)s")

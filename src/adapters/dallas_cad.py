@@ -41,9 +41,14 @@ from bs4 import BeautifulSoup
 from playwright.async_api import async_playwright
 
 from ..addr import STREET_TYPES, normalize_address
+from ..source_registry import assert_registry_sync, require_endpoint
 from .base import SourceAdapter, SourceProvenance
 
-DCAD_URL = "https://www.dallascad.org/SearchAddr.aspx"
+# TD3: both URLs derived from SOURCE-REGISTRY at import — no hardcoded
+# portal literals. DCAD_DETAIL_BASE_URL is where relative detail hrefs from
+# the results grid resolve against (previously a second raw literal here).
+DCAD_URL = require_endpoint("dallas", "cad_search").url
+DCAD_DETAIL_BASE_URL = require_endpoint("dallas", "cad_detail").url
 UA = "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
 
 # RL9: parse-yield probe switch (opt-in via environment).
@@ -427,7 +432,7 @@ async def _search_dcad_by_address(address: str) -> dict:
     """Search DCAD by property address using Playwright.
 
     Verified live Aug 20 2026:
-    - Search URL: https://www.dallascad.org/SearchAddr.aspx
+    - Search URL: registry dallas/cad_search endpoint (SearchAddr.aspx)
     - Form fields: #txtAddrNum (street number), #txtStName (street name, no suffix)
     - Submit button: input[name="cmdSubmit"] (value="Search")
     - ASP.NET form requires page.type() for proper keyboard events
@@ -453,7 +458,7 @@ async def _search_dcad_by_address(address: str) -> dict:
         page = await browser.new_page()
 
         try:
-            await page.goto("https://www.dallascad.org/SearchAddr.aspx", timeout=30000)
+            await page.goto(DCAD_URL, timeout=30000)
             await page.wait_for_load_state("networkidle", timeout=15000)
             await page.wait_for_timeout(2000)
 
@@ -486,7 +491,7 @@ async def _search_dcad_by_address(address: str) -> dict:
                     if not href.startswith("http"):
                         if not href.startswith("/"):
                             href = "/" + href
-                        href = f"https://www.dallascad.org{href}"
+                        href = f"{DCAD_DETAIL_BASE_URL}{href}"
                     await page.goto(href, timeout=15000)
                     await page.wait_for_load_state("networkidle", timeout=10000)
                     await page.wait_for_timeout(2000)
@@ -603,6 +608,12 @@ class DallasCADAdapter(SourceAdapter):
 
 
 if __name__ == "__main__":
+    # Self-check (TD3): DCAD_URL / DCAD_DETAIL_BASE_URL are registry-derived;
+    # assert the whole adapter-constant <-> REGISTRY binding table holds.
+    assert_registry_sync()
+    print("dallas_cad.py: PASS — DCAD URLs derived from SOURCE-REGISTRY "
+          "(assert_registry_sync)")
+
     # Self-check: address parsing
     m = re.match(r'^(\d+)\s+(.+)', "15806 BREEDLOVE PLACE")
     assert m is not None

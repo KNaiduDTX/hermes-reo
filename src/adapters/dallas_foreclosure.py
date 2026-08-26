@@ -36,9 +36,13 @@ from bs4 import BeautifulSoup
 import pypdf
 
 from .base import SourceAdapter, NormalizedLead, SourceProvenance
+from ..source_registry import assert_registry_sync, require_endpoint
 
-BASE_URL = "https://www.dallascounty.org"
-PORTAL_URL = f"{BASE_URL}/government/county-clerk/recording/foreclosures.php"
+# TD3: derived from SOURCE-REGISTRY at import — no hardcoded portal literals.
+# PORTAL_URL is the full foreclosures.php page; BASE_URL is the county site
+# root that relative PDF hrefs resolve against.
+PORTAL_URL = require_endpoint("dallas", "foreclosure_notice").url
+BASE_URL = require_endpoint("dallas", "county_site").url
 UA = "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
 
 # RL2: raised when the portal HTML no longer matches the structure this
@@ -761,6 +765,12 @@ def export_portal_health(limit: int | None = None,
 if __name__ == "__main__":
     import tempfile
     from src.dates import parse_date_any
+
+    # Self-check (TD3): PORTAL_URL/BASE_URL are registry-derived; assert the
+    # whole adapter-constant <-> REGISTRY binding table holds.
+    assert_registry_sync()
+    print("dallas_foreclosure.py: PASS — portal URLs derived from SOURCE-REGISTRY "
+          "(assert_registry_sync)")
 
     # Self-check: city extraction fix
     assert _extract_city("15806 BREEDLOVE PLACE, ADDISON, TX 75001") == "ADDISON"

@@ -9,7 +9,8 @@ from __future__ import annotations
 import json
 import sys
 import os
-from datetime import datetime
+from datetime import datetime, timezone
+from typing import Any, Optional
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
@@ -25,9 +26,12 @@ from src.underwriting import mao
 from src.pricing import assign_blast_tier
 from src.compliance import gate_legal_lien
 from src.synthesis import portfolio_stats, render_stats_report, get_city
-from src.cpr import CPR
+from src.cpr import CPR, pv_value
 from src.addr import is_plausible_street_address, normalize_address
 from src.io_utils import write_json, write_text  # atomic crash-safe writers (shared contract)
+# TD8: shared deal-economics kernel (equity/LTV trio) so analysis and portfolio
+# rollups can never drift apart on the arithmetic.
+from src.metrics import compute_leverage_metrics
 
 # F1: dataset location is overridable via env; default keeps the lucid-noether path.
 DEFAULT_LUCID_DATA = "/Users/knaidu/Documents/antigravity/lucid-noether/foreclosure_report.json"
@@ -47,6 +51,7 @@ ENRICHMENT_CARRY_FORWARD_FIELDS = (
     "sqft", "beds", "baths", "year_built", "stories", "pool",
     "cad_value", "cad_value_2025", "census_tract", "county_fips",
     "latitude", "longitude",
+    "val_gate",  # human HITL gate decisions must survive regeneration (reviewer low-note)
 )
 
 
@@ -193,9 +198,9 @@ def fetch_live_cprs(limit=5):
 # copies usable CPR coordinates into the row under the same latitude/longitude
 # keys pipeline.py --geocode-backfill writes.
 
-def _coord_float(value):
-    """Unwrap a provenance field/plain value and parse to float, or None."""
-    unwrapped = value.value if hasattr(value, "value") else value
+def _coord_float(value: Any) -> Optional[float]:
+    """Unwrap a provenance field/plain value (pv_value) and parse to float, or None."""
+    unwrapped = pv_value(value)
     try:
         return float(unwrapped) if unwrapped not in (None, "") else None
     except (TypeError, ValueError):
@@ -208,8 +213,8 @@ def copy_cpr_coordinates(cpr: CPR, deal: dict) -> bool:
     Returns True when coordinates were copied. Never removes or overwrites
     with empties — rows keep whatever they already had otherwise.
     """
-    lat = _coord_float(getattr(cpr, "gis_lat", None))
-    lng = _coord_float(getattr(cpr, "gis_lng", None))
+    lat = _coord_float(cpr.get("gis_lat"))
+    lng = _coord_float(cpr.get("gis_lng"))
     if lat and lng and lat != 0 and lng != 0:
         deal["latitude"] = lat
         deal["longitude"] = lng
@@ -337,33 +342,39 @@ def scrape_live_collin(limit=5):
 
 
 def analyze_deal(cpr: CPR) -> dict:
-    """Analyze a single deal — everything we know, what's blocked."""
+    """Analyze a single deal — everything we know, what's blocked.
+
+    TD1: every provenance-managed key is read through CPR.get() (the
+    provenance-unwrapping accessor over declared fields), replacing the old
+    ``cpr.f.value if cpr.f else default`` hasattr walls. Semantics are
+    unchanged, including the edge where a receipted field holds None
+    (CPR.get unwraps it to None rather than substituting the default).
+    """
     addr = cpr.situs_address
     # F3: CPR may or may not carry a parsed city field — fall back to get_city().
-    city_pf = getattr(cpr, "city", None)
-    city = (city_pf.value if city_pf else None) or get_city(addr)
-    sqft = cpr.improvement_sqft.value if cpr.improvement_sqft else None
-    beds = cpr.beds.value if cpr.beds else None
-    baths = cpr.baths.value if cpr.baths else None
-    yr_built = cpr.year_built.value if cpr.year_built else None
-    stories = cpr.stories.value if cpr.stories else None
-    pool = cpr.pool.value if cpr.pool else None
-    cad_val = cpr.cad_appraised_value.value if cpr.cad_appraised_value else None
-    cad_val_2025 = cpr.cad_appraised_value_2025.value if hasattr(cpr, 'cad_appraised_value_2025') and cpr.cad_appraised_value_2025 else None
-    owner = cpr.owner_name.value if cpr.owner_name else "Unknown"
-    ptype = cpr.property_type.value if cpr.property_type else "Unknown"
-    sale_date = cpr.sale_date.value if cpr.sale_date else "Unknown"
-    isd = cpr.isd.value if hasattr(cpr, 'isd') and cpr.isd else "Unknown"
-    lender = cpr.foreclosing_lender.value if hasattr(cpr, 'foreclosing_lender') and cpr.foreclosing_lender else "Unknown"
-    trustee = cpr.substitute_trustee.value if hasattr(cpr, 'substitute_trustee') and cpr.substitute_trustee else "Unknown"
-    sale_time = cpr.scheduled_sale_time.value if hasattr(cpr, 'scheduled_sale_time') and cpr.scheduled_sale_time else "Unknown"
-    orig_principal = cpr.original_principal.value if hasattr(cpr, 'original_principal') and cpr.original_principal else None
-    unpaid_principal = cpr.unpaid_principal_balance.value if hasattr(cpr, 'unpaid_principal_balance') and cpr.unpaid_principal_balance else None
-    all_balances = cpr.all_extracted_balances.value if hasattr(cpr, 'all_extracted_balances') and cpr.all_extracted_balances else []
-    census_tract = cpr.census_tract.value if hasattr(cpr, 'census_tract') and cpr.census_tract else None
-    county_fips = cpr.county_fips.value if hasattr(cpr, 'county_fips') and cpr.county_fips else None
-    commercial = cpr.commercial.value if hasattr(cpr, 'commercial') and cpr.commercial else False
-    deed_number = cpr.deed_number.value if hasattr(cpr, 'deed_number') and cpr.deed_number else None
+    city = cpr.get("city") or get_city(addr)
+    sqft = cpr.get("improvement_sqft")
+    beds = cpr.get("beds")
+    baths = cpr.get("baths")
+    yr_built = cpr.get("year_built")
+    stories = cpr.get("stories")
+    pool = cpr.get("pool")
+    cad_val = cpr.get("cad_appraised_value")
+    cad_val_2025 = cpr.get("cad_appraised_value_2025")
+    owner = cpr.get("owner_name", "Unknown")
+    ptype = cpr.get("property_type", "Unknown")
+    sale_date = cpr.get("sale_date", "Unknown")
+    isd = cpr.get("isd", "Unknown")
+    lender = cpr.get("foreclosing_lender", "Unknown")
+    trustee = cpr.get("substitute_trustee", "Unknown")
+    sale_time = cpr.get("scheduled_sale_time", "Unknown")
+    orig_principal = cpr.get("original_principal")
+    unpaid_principal = cpr.get("unpaid_principal_balance")
+    all_balances = cpr.get("all_extracted_balances", [])
+    census_tract = cpr.get("census_tract")
+    county_fips = cpr.get("county_fips")
+    commercial = cpr.get("commercial", False)
+    deed_number = cpr.get("deed_number")
 
     # Debt from liens
     mortgage_debt = sum(l.amount or 0 for l in cpr.liens if l.lien_type == "mortgage")
@@ -383,17 +394,8 @@ def analyze_deal(cpr: CPR) -> dict:
         rough_rehab = sqft * (20 if (yr_built and yr_built < 2010) else 10)
         preliminary_mao = mao(cad_val, rough_rehab, 0.70)
 
-    # Equity estimate: CAD - debt
-    equity_estimate = None
-    equity_pct = None
-    if cad_val and mortgage_debt and mortgage_debt > 0:
-        equity_estimate = cad_val - mortgage_debt
-        equity_pct = (equity_estimate / cad_val) * 100 if cad_val > 0 else 0
-
-    # LTV
-    ltv = None
-    if cad_val and mortgage_debt and mortgage_debt > 0:
-        ltv = (mortgage_debt / cad_val) * 100
+    # Equity / LTV trio — shared kernel (TD8), historical inline math.
+    leverage = compute_leverage_metrics(cad_val, mortgage_debt)
 
     # Valuation change 2025→2026
     val_change = None
@@ -421,9 +423,9 @@ def analyze_deal(cpr: CPR) -> dict:
         "unpaid_principal": unpaid_principal,
         "all_balances": all_balances,
         "census_tract": census_tract, "county_fips": county_fips,
-        "equity_estimate": equity_estimate,
-        "equity_pct": equity_pct,
-        "ltv_pct": ltv,
+        "equity_estimate": leverage["equity_estimate"],
+        "equity_pct": leverage["equity_pct"],
+        "ltv_pct": leverage["ltv_pct"],
         "preliminary_mao": preliminary_mao,
         "rough_rehab": rough_rehab if rough_rehab > 0 else None,
         "blast_tier": tier.name,
@@ -436,13 +438,13 @@ def analyze_deal(cpr: CPR) -> dict:
     return mark_invalid_query(deal)
 
 
-def main():
+def main() -> None:
     import logging
     logging.basicConfig(level=logging.INFO,
                         format="%(levelname)s %(name)s: %(message)s")
     print("=" * 70)
     print("  HERMES-REO — FULL DEAL FINDER")
-    print(f"  Run time: {datetime.utcnow().isoformat()}")
+    print(f"  Run time: {datetime.now(timezone.utc).isoformat()}")
     print("=" * 70)
 
     # Load prior dataset (335 records with full enrichment)

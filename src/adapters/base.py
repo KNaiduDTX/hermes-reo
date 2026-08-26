@@ -2,6 +2,40 @@
 """Source adapter interface — all external I/O sits behind typed adapters.
 
 Swap a source without touching underwriting logic.
+
+Two-tier convention (TD4)
+-------------------------
+TIER 1 — SCRAPER ADAPTERS (classes, here in ``src/adapters/``)
+    Subclass :class:`SourceAdapter` and implement
+    ``fetch(**params) -> list[NormalizedLead]``; expose ``provenance()``
+    returning a :class:`SourceProvenance`-shaped record (``.source``,
+    ``.retrieved_at``, ``.source_rigor_tier``). Signatures must stay
+    keyword-callable — every parameter defaulted or a ``**kwargs`` sink,
+    never positional-only or required-positional — so callers can probe and
+    drive any adapter uniformly. Members: CollinForeclosureAdapter,
+    CollinClerkAdapter, DallasForeclosureAdapter, GraysonTaxAdapter,
+    DallasCADAdapter. Grandfathered payload deviations, each pinned with an
+    explicit reason in ``tests/test_adapter_contract.py``:
+
+    - ``DallasCADAdapter.fetch -> dict``: legacy single-address DCAD detail
+      lookup consumed by ``src/enrichment.py`` and
+      ``dallas_cad_bulk.batch_cross_reference()``; a property lookup, not a
+      lead producer.
+    - ``CollinClerkAdapter.fetch -> list[RecordedInstrument]``: title/lien
+      search channel (GATE-LEGAL-LIEN) consumed via
+      ``search_encumbrances()``/``build_lien_stack()``; not the lead funnel.
+
+TIER 2 — SERVICE MODULES (plain function modules)
+    ``census``, ``dallas_cad_bulk``, ``geojson_export``, ``notice_ocr``,
+    ``route_optimizer`` are plain function namespaces. They consume/produce
+    CPRs and the shared dataclasses below but must NOT pretend subclassing:
+    no shim class inheriting SourceAdapter just to borrow the interface. A
+    service that needs provenance constructs ``SourceProvenance(...)``
+    directly (see ``dallas_cad_bulk``).
+
+``tests/test_adapter_contract.py`` discovers every SourceAdapter subclass
+via ``__subclasses__()`` and enforces this contract, including the tier-2
+negative assertion.
 """
 from __future__ import annotations
 import hashlib
@@ -74,9 +108,14 @@ class SourceProvenance:
 
 
 class SourceAdapter:
-    """Base class for all source adapters.
+    """Base class for Tier-1 scraper adapters (see module docstring).
 
-    Subclasses implement fetch(). The base provides provenance().
+    Contract: implement ``fetch(**params) -> list[NormalizedLead]`` with a
+    keyword-callable signature (all params defaulted or a ``**kwargs``
+    sink), and return a SourceProvenance-shaped record from provenance().
+    The base provides provenance(). Tier-2 service modules (census,
+    dallas_cad_bulk, geojson_export, notice_ocr, route_optimizer) do NOT
+    subclass this.
     """
     channel: str = ""
     county: str = ""

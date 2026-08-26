@@ -12,10 +12,12 @@ from collections import Counter
 from datetime import datetime, timezone
 from typing import Any, Optional
 
-from .cpr import CPRColumn, pv_value
+from .cpr import CPR, CPRColumn
 # X7: reuse AGENT-ENR's ISD extraction so portfolio rollups and enrichment can
 # never disagree about how an ISD is derived from taxing-entity strings.
-from .enrichment import extract_isd
+# TD8: raw dict rows are converted to CPRs at portfolio_stats entry through
+# enrich_from_flat_record, so exactly one record type flows through rollups.
+from .enrichment import enrich_from_flat_record, extract_isd
 
 
 # --- Known DFW cities (ported from lucid-noether) ---
@@ -50,14 +52,46 @@ def get_city(addr: str) -> str:
     return "Unknown"
 
 
-def _parse_value(val: Any) -> float:
-    """Parse a dollar value from a string like '$730,673.00'."""
-    if val is None or val == "Unknown":
-        return 0.0
-    if isinstance(val, (int, float)):
-        return float(val)
-    cleaned = re.sub(r'[^\d.]', '', str(val))
-    return float(cleaned) if cleaned else 0.0
+def _stats_rows(cprs: list[Any]) -> list[CPR]:
+    """TD8 entry normalization for portfolio rollups: exactly one record type
+    flows through. CPR objects pass through untouched; raw dict rows are
+    converted at entry via enrich_from_flat_record (the flat
+    current_deals.json schema). The legacy nested-lucid dict branch is
+    retired — nested records carry no flat keys, so a caller holding them
+    enriches first (enrich_from_raw_record). Anything else fails loudly.
+    """
+    rows: list[CPR] = []
+    for row in cprs:
+        if isinstance(row, CPR):
+            rows.append(row)
+        elif isinstance(row, dict):
+            rows.append(enrich_from_flat_record(row))
+        else:
+            raise TypeError(
+                "portfolio_stats expects CPR objects or flat dict rows, "
+                f"got {type(row).__name__}")
+    return rows
+
+
+def _record_isd(cpr: CPR) -> str:
+    """X7: the receipted `isd` field wins when populated; otherwise derive
+    from the taxing-entity strings (same extraction AGENT-ENR uses at
+    ingestion)."""
+    isd = cpr.get("isd")
+    if not isd or isd == "Unknown":
+        isd = extract_isd(cpr.get("taxing_entities") or "")
+    return isd
+
+
+def _value_distribution(values: list[float]) -> dict[str, Any]:
+    """total/mean/median/min/max summary over collected values (0-filled)."""
+    return {
+        "total": sum(values),
+        "mean": statistics.mean(values) if values else 0,
+        "median": statistics.median(values) if values else 0,
+        "min": min(values) if values else 0,
+        "max": max(values) if values else 0,
+    }
 
 
 def portfolio_stats(cprs: list[Any]) -> dict[str, Any]:
@@ -65,7 +99,15 @@ def portfolio_stats(cprs: list[Any]) -> dict[str, Any]:
 
     Ported from lucid-noether analyze_foreclosures.py.
     Returns a dict with city/ISD/valuation/price-per-sqft distributions.
+
+    TD8: raw dict rows are normalized at entry (_stats_rows), so exactly one
+    record type flows through the accumulation loop.
+
+    TD1: per-record reads go through CPR.get(), the provenance-unwrapping
+    accessor over declared fields, instead of pv_value/hasattr walls.
     """
+    cpr_rows = _stats_rows(cprs)
+
     cities = []
     isds = []
     property_types = []
@@ -86,59 +128,20 @@ def portfolio_stats(cprs: list[Any]) -> dict[str, Any]:
         r'INVESTMENTS|CO|COMPANY)\b', re.IGNORECASE
     )
 
-    for cpr in cprs:
-        # Handle both CPR objects and raw dicts (from lucid-noether JSON)
-        if hasattr(cpr, 'situs_address'):
-            addr = cpr.situs_address
-            city = get_city(addr)
-            owner_name = pv_value(cpr.owner_name) if cpr.owner_name else "Unknown"
-            val = pv_value(cpr.cad_appraised_value) if cpr.cad_appraised_value else 0.0
-            sqft = pv_value(cpr.improvement_sqft) if cpr.improvement_sqft else 0
-            yr = pv_value(cpr.year_built) if cpr.year_built else 0
-            ptype = pv_value(cpr.property_type) if cpr.property_type else "Unknown"
-            # X7 fix: CPR has no `jurisdiction_info` attribute — that field only
-            # exists on raw source dicts. ISD comes from the `isd` provenance
-            # field when populated, otherwise it is derived from the taxing-
-            # entity strings (same extraction AGENT-ENR uses at ingestion).
-            taxing = pv_value(getattr(cpr, "taxing_entities", None)) or ""
-            isd = pv_value(getattr(cpr, "isd", None))
-            if not isd or isd == "Unknown":
-                isd = extract_isd(taxing)
-            # Debt from liens
-            debt = sum(l.amount or 0 for l in cpr.liens if l.lien_type == "mortgage")
-            lender = cpr.liens[0].lender if cpr.liens else "Unknown"
-            # X7: trustee distribution covers CPR objects too — pull the
-            # substitute_trustee provenance field instead of leaving the list
-            # empty for every enriched record.
-            trustee = pv_value(getattr(cpr, "substitute_trustee", None)) or "Unknown"
-            trustees.append(trustee)
-        else:
-            # Raw dict (lucid-noether format)
-            addr = cpr.get("property_address", "")
-            city = get_city(addr)
-            details = cpr.get("details", {})
-            owner_name = details.get("owner_info", {}).get("Name", "Unknown")
-            val = _parse_value(details.get("tax_info", {}).get("Appraised Value (2026)", "$0"))
-            sqft_str = details.get("improvement_info", {}).get("Improvement Area", "Unknown")
-            sqft = _parse_value(sqft_str)
-            yr_str = details.get("improvement_info", {}).get("Year Built", "0")
-            try:
-                yr = int(re.sub(r'[^\d]', '', yr_str)) if yr_str else 0
-            except ValueError:
-                yr = 0
-            ptype = details.get("property_info", {}).get("Type", "Unknown")
-            taxing = details.get("jurisdiction_info", {}).get("Taxing Entities", "")
-            isd_match = re.search(r'([A-Za-z0-9\s]+ISD)\b', taxing)
-            isd = isd_match.group(1).strip() if isd_match else "Unknown"
-            ocr = details.get("scanned_notice_ocr_data", {})
-            debt = ocr.get("estimated_default_balance", 0.0)
-            lender = ocr.get("foreclosing_lender", "Unknown")
-            trustee = ocr.get("substitute_trustee", "Unknown")
-            trustees.append(trustee)
+    for cpr in cpr_rows:
+        owner_name = cpr.get("owner_name", "Unknown")
+        val = cpr.get("cad_appraised_value", 0.0)
+        sqft = cpr.get("improvement_sqft", 0)
+        yr = cpr.get("year_built", 0)
+        # Debt from liens; lender/trustee from the receipted fields.
+        debt = sum(l.amount or 0 for l in cpr.liens if l.lien_type == "mortgage")
+        lender = cpr.liens[0].lender if cpr.liens else "Unknown"
+        trustee = cpr.get("substitute_trustee") or "Unknown"
+        trustees.append(trustee)
 
-        cities.append(city)
-        isds.append(isd)
-        property_types.append(ptype)
+        cities.append(get_city(cpr.situs_address))
+        isds.append(_record_isd(cpr))
+        property_types.append(cpr.get("property_type", "Unknown"))
         if yr and yr > 0:
             years_built.append(yr)
         if val and val > 0:
@@ -161,24 +164,12 @@ def portfolio_stats(cprs: list[Any]) -> dict[str, Any]:
         "cities": dict(Counter(cities).most_common()),
         "isds": dict(Counter(isds).most_common()),
         "property_types": dict(Counter(property_types).most_common()),
-        "appraised": {
-            "total": sum(appraised),
-            "mean": statistics.mean(appraised) if appraised else 0,
-            "median": statistics.median(appraised) if appraised else 0,
-            "min": min(appraised) if appraised else 0,
-            "max": max(appraised) if appraised else 0,
-        },
+        "appraised": _value_distribution(appraised),
         "price_per_sqft": {
             "mean": statistics.mean(price_per_sqft) if price_per_sqft else 0,
             "median": statistics.median(price_per_sqft) if price_per_sqft else 0,
         },
-        "debt": {
-            "total": sum(debts),
-            "mean": statistics.mean(debts) if debts else 0,
-            "median": statistics.median(debts) if debts else 0,
-            "min": min(debts) if debts else 0,
-            "max": max(debts) if debts else 0,
-        },
+        "debt": _value_distribution(debts),
         "lender_concentration": dict(Counter(lenders).most_common(10)),
         "trustee_distribution": dict(Counter(trustees).most_common(10)) if trustees else {},
     }
@@ -288,28 +279,23 @@ def weekly_digest(cprs: list[Any], dead_reasons: Optional[dict[str, int]] = None
 
 
 if __name__ == "__main__":
-    # Self-check: stats on fixture data
+    # Self-check: stats over FLAT dict rows (TD8 entry conversion via
+    # enrich_from_flat_record — same schema the /api/stats endpoint feeds in),
+    # then real CPR objects for the X7 ISD/trustee behavior.
     fixture = [
-        {"property_address": "10022 Plainsman Ln, Frisco, TX 75035",
-         "details": {
-             "property_info": {"Type": "Residential Single Family (A1)"},
-             "improvement_info": {"Improvement Area": "4,332 sq ft", "Year Built": "2004"},
-             "jurisdiction_info": {"Taxing Entities": "Collin County / Frisco ISD / Frisco City"},
-             "owner_info": {"Name": "Islam Mazhar & Ambreen"},
-             "tax_info": {"Appraised Value (2026)": "$730,673.00"},
-             "scanned_notice_ocr_data": {"estimated_default_balance": 350000,
-                                         "foreclosing_lender": "Wells Fargo"},
-         }},
-        {"property_address": "15806 Breedlove Pl, Addison, TX 75001",
-         "details": {
-             "property_info": {"Type": "Residential Single Family (A1)"},
-             "improvement_info": {"Improvement Area": "Unknown", "Year Built": "Unknown"},
-             "jurisdiction_info": {"Taxing Entities": "Dallas County / Addison"},
-             "owner_info": {"Name": "KERRY P. GRAY"},
-             "tax_info": {"Appraised Value (2026)": "$387,000.00"},
-             "scanned_notice_ocr_data": {"estimated_default_balance": 309600,
-                                         "foreclosing_lender": "CTX Mortgage"},
-         }},
+        {"address": "10022 Plainsman Ln, Frisco, TX 75035",
+         "county": "collin",
+         "owner": "Islam Mazhar & Ambreen",
+         "property_type": "Residential Single Family (A1)",
+         "sqft": 4332, "year_built": 2004,
+         "cad_value": 730673.00,
+         "mortgage_debt": 350000, "lender": "Wells Fargo"},
+        {"address": "15806 Breedlove Pl, Addison, TX 75001",
+         "county": "dallas",
+         "owner": "KERRY P. GRAY",
+         "property_type": "Residential Single Family (A1)",
+         "cad_value": 387000.00,
+         "mortgage_debt": 309600, "lender": "CTX Mortgage"},
     ]
 
     stats = portfolio_stats(fixture)
@@ -319,18 +305,41 @@ if __name__ == "__main__":
     assert stats["appraised"]["total"] == 1_117_673.0
     assert stats["debt"]["total"] == 659_600.0
     assert "Wells Fargo" in stats["lender_concentration"]
+    assert "CTX Mortgage" in stats["lender_concentration"]
+    # Neither flat row carries isd/taxing entities → honest "Unknown" for both.
+    assert stats["isds"] == {"Unknown": 2}, stats["isds"]
 
     report = render_stats_report(stats)
     assert "PORTFOLIO STATISTICAL SUMMARY" in report
     assert "Frisco" in report
     assert "DEBT EXPOSURE" in report
 
-    # X7: real CPR objects — ISD derives from taxing-entity strings when the
-    # `isd` field is missing (the old code read a nonexistent
-    # `jurisdiction_info` attribute, so ISD was always Unknown), and the
-    # trustee distribution now includes enriched records.
-    from .cpr import CPR, ProvenanceField
+    # TD8: mixed input lists normalize to a single internal type; garbage
+    # input fails loudly instead of silently rolling into an empty branch.
+    mixed = portfolio_stats(fixture + [CPR(parcel_id="SYN0", county="collin",
+                                           situs_address="9 Elm St, Plano, TX 75023")])
+    assert mixed["total_properties"] == 3
+    assert mixed["cities"].get("Plano") == 1
+    try:
+        portfolio_stats([42])  # type: ignore[list-item]
+        raise AssertionError("expected TypeError for non-CPR/non-dict row")
+    except TypeError:
+        pass
 
+    # TD8: the shared leverage kernel (src/metrics.py) — the equity/LTV trio
+    # analyze_deal stamps on every row.
+    from .metrics import compute_leverage_metrics
+
+    lev = compute_leverage_metrics(300_000.0, 150_000.0)
+    assert lev == {"equity_estimate": 150000.0, "equity_pct": 50.0,
+                   "ltv_pct": 50.0}, lev
+    for cad, debt in ((None, 100.0), (300_000.0, 0), (300_000.0, None)):
+        assert compute_leverage_metrics(cad, debt) == {
+            "equity_estimate": None, "equity_pct": None, "ltv_pct": None}
+
+    # X7: real CPR objects — ISD derives from taxing-entity strings when the
+    # `isd` field is missing, and the trustee distribution includes enriched
+    # records.
     def _cpr_with(taxing: str, isd: str | None = None, trustee: str = "") -> CPR:
         c = CPR(parcel_id="SYN1", county="collin",
                 situs_address="101 Sachse Rd, Sachse, TX 75048")
@@ -359,5 +368,6 @@ if __name__ == "__main__":
     stats_none = portfolio_stats([_cpr_with("Dallas County / City of Addison")])
     assert stats_none["isds"] == {"Unknown": 1}, stats_none["isds"]
 
+    print("synthesis.py: TD8 — flat-row entry conversion + leverage kernel verified")
     print("synthesis.py: X7 — CPR ISD derivation + trustee distribution verified")
     print("synthesis.py: all self-checks passed")

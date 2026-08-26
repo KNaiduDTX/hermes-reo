@@ -1,0 +1,37 @@
+# HERMES-REO — project metadata + tool configuration (TD10 phase 1).
+#
+# This file is now the single source of truth for pytest/ruff/mypy settings.
+# pytest.ini was absorbed into [tool.pytest.ini_options] verbatim and deleted
+# once collection parity was verified (identical `pytest --collect-only`
+# output before/after the swap). CI (.github/workflows/ci.yml) and the
+# Makefile run plain `pytest` / flagged `ruff check`, both of which discover
+# this file automatically — no workflow edits required.
+
+[project]
+name = "hermes-reo"
+version = "0.1.0"
+description = "HERMES-REO end-to-end REO deal pipeline: source -> enrich -> value -> underwrite -> price -> memo -> review"
+requires-python = ">=3.9"
+
+[tool.ruff.lint]
+# Correctness-errors-only profile — byte-for-byte the same rule set as the
+# pre-commit hook and CI lint gate (`--select E9,F63,F7,F82,B006,B017`).
+select = ["E9", "F63", "F7", "F82", "B006", "B017"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["."]
+addopts = '-q --strict-markers -m "not live and not recalc"'
+markers = [
+    "live: tests that hit real county portals (opt in with -m live)",
+    "needs_dataset: tests that read data/current_deals.json (skipped when absent)",
+    "recalc: tests requiring a LibreOffice-recalculated workbook (opt in with -m recalc)",
+]
+norecursedirs = [".venv", "data", "out", "static", ".git"]
+
+[tool.mypy]
+# NON-GATING: pins type-check intent only — CI wiring lands later. Not part of
+# make verify / ci-local until that wiring exists.
+python_version = "3.11"
+files = ["pipeline.py", "src"]
+ignore_missing_imports = true

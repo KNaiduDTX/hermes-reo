@@ -9,6 +9,13 @@ retried. 4xx responses and undecodable JSON fail fast. Backoff carries
 uniform jitter of up to half the computed delay, and there is deliberately
 no terminal sleep after the final attempt.
 
+RL8 phase 1: the attempt loop is net_retry.call_with_retry and failures
+flow internally as the src.errors family (TransientSourceError for
+timeout/transport/5xx, PermanentSourceError for other HTTP statuses,
+ParseShapeError for undecodable JSON). These types are flow control ONLY —
+every caller-visible return contract (signatures, status vocabulary,
+failure strings) is byte-identical to the pre-RL8 adapter.
+
 RL11 unified negative cache: the CLI backfill (pipeline.py
 --geocode-backfill) keeps a failure ledger in data/geocode_failures.json
 while enrich_batch only ever consulted each record's own last stored status
@@ -24,15 +31,20 @@ import hashlib
 import json
 import logging
 import os
-import random
 import time
 from datetime import datetime, timedelta, timezone
 from typing import Optional
 
 import httpx
 
+from .. import net_retry
 from ..addr import to_census_one_line
+from ..errors import (PermanentSourceError, ParseShapeError, SourceError,
+                      TransientSourceError)
 from ..io_utils import write_json
+from ..net_retry import (TRANSPORT_EXCEPTIONS, call_with_retry,
+                         is_retryable_status, is_transient_source_error,
+                         should_retry)
 
 logger = logging.getLogger(__name__)
 
@@ -46,8 +58,10 @@ BACKOFF_BASE = 1.0
 GEOCODE_RATE_LIMIT_S = 0.5
 
 # N2: the complete set of retryable exception types. TimeoutException is a
-# TransportError subclass in httpx; both are listed for explicitness.
-RETRYABLE_EXCEPTIONS = (httpx.TimeoutException, httpx.TransportError)
+# TransportError subclass in httpx; both are listed for explicitness. The
+# canonical tuple lives in net_retry.TRANSPORT_EXCEPTIONS; this alias stays
+# so existing importers keep seeing one name.
+RETRYABLE_EXCEPTIONS = TRANSPORT_EXCEPTIONS
 
 # --- RL11: shared negative-ledger policy ------------------------------------
 # The one status that counts as "resolved" for every consumer.
@@ -63,74 +77,74 @@ DEFAULT_LEDGER_PATH = os.path.join(
     "geocode_failures.json")
 
 
-def _should_retry(exc: Optional[BaseException], status: Optional[int]) -> bool:
-    """Pure N2 retry policy — safe to unit-test offline (no I/O).
-
-    Retry ONLY timeouts/transport errors and HTTP 5xx. When *exc* is given it
-    decides alone: any non-transport exception (JSON decode errors, unexpected
-    bugs) fails fast regardless of status. A bare status retries iff >= 500;
-    a missing status with no exception (e.g. connection refused surfaced as
-    neither) does not retry.
-    """
-    if exc is not None:
-        return isinstance(exc, RETRYABLE_EXCEPTIONS)
-    return status is not None and status >= 500
-
-
-def _backoff_delay(attempt: int) -> float:
-    """Exponential backoff seconds for the given 1-based attempt."""
-    return BACKOFF_BASE * (2 ** (attempt - 1))
-
-
-def _sleep_backoff(attempt: int) -> None:
-    """Sleep the exponential backoff with uniform jitter of half the delay.
-
-    The actual sleep is drawn uniformly from [delay/2, delay] so concurrent
-    workers de-synchronize while staying bounded by the plain backoff.
-    """
-    delay = _backoff_delay(attempt)
-    time.sleep(random.uniform(delay / 2.0, delay))
-
-
-def _request_json(url: str, params: dict, timeout_s: float) -> tuple[Optional[dict], Optional[str]]:
+def _request_json(url: str, params: dict, timeout_s: float,
+                  transport: Optional[httpx.BaseTransport] = None
+                  ) -> tuple[Optional[dict], Optional[str]]:
     """GET *url* and JSON-decode it under the N2 retry policy.
 
     Returns (payload, None) on success, or (None, failure_status_string).
     No terminal sleep runs after the final attempt.
+
+    RL8 phase 1: the attempt loop lives in net_retry.call_with_retry and
+    failures travel as typed errors — TransientSourceError (timeout /
+    transport / HTTP 5xx; retried), PermanentSourceError (other HTTP
+    statuses and non-transport request bugs; fail fast) and ParseShapeError
+    (undecodable JSON; fail fast). They are INTERNAL flow control only:
+    each is resolved back into the exact historical status string below, so
+    callers see byte-identical results. The optional *transport* hook exists
+    for offline tests (httpx.MockTransport); production passes None and gets
+    the default stack.
     """
-    for attempt in range(1, MAX_RETRIES + 1):
-        exc: Optional[BaseException] = None
-        status: Optional[int] = None
+    attempt_no = 0
+
+    def _fetch_once() -> dict:
+        nonlocal attempt_no
+        attempt_no += 1
+        attempt = attempt_no
         try:
-            resp = httpx.get(url, params=params, timeout=timeout_s)
-            status = resp.status_code
-        except RETRYABLE_EXCEPTIONS as e:
-            exc = e
+            with httpx.Client(timeout=timeout_s, transport=transport) as client:
+                resp = client.get(url, params=params)
+        except TRANSPORT_EXCEPTIONS as e:
             logger.warning("census attempt %d/%d failed: %s: %s",
                            attempt, MAX_RETRIES, type(e).__name__, e)
+            raise TransientSourceError(f"{type(e).__name__}: {e}",
+                                       source="census") from e
         except Exception as e:
             # Anything outside the transport family never justifies a retry.
-            logger.warning("census non-retryable failure: %s: %s", type(e).__name__, e)
-            return None, f"Census request failed ({type(e).__name__})"
-        else:
-            if status == 200:
-                try:
-                    return resp.json(), None
-                except ValueError as e:
-                    logger.warning("census invalid JSON response: %s: %s",
-                                   type(e).__name__, e)
-                    return None, "Census returned invalid JSON"
-            logger.warning("census attempt %d/%d got HTTP %s from %s",
-                           attempt, MAX_RETRIES, status, url)
+            logger.warning("census non-retryable failure: %s: %s",
+                           type(e).__name__, e)
+            raise PermanentSourceError(
+                f"Census request failed ({type(e).__name__})",
+                source="census") from e
+        if resp.status_code == 200:
+            try:
+                return resp.json()
+            except ValueError as e:
+                logger.warning("census invalid JSON response: %s: %s",
+                               type(e).__name__, e)
+                raise ParseShapeError("Census returned invalid JSON",
+                                      source="census") from e
+        logger.warning("census attempt %d/%d got HTTP %s from %s",
+                       attempt, MAX_RETRIES, resp.status_code, url)
+        if is_retryable_status(resp.status_code):
+            raise TransientSourceError(f"HTTP {resp.status_code}",
+                                       source="census")
+        raise PermanentSourceError(
+            f"Census HTTP {resp.status_code} — failing fast", source="census")
 
-        if not _should_retry(exc, status):
-            if status is not None:
-                return None, f"Census HTTP {status} — failing fast"
-            return None, "Census request failed"
-        if attempt < MAX_RETRIES:
-            _sleep_backoff(attempt)
-
-    return None, "Failed after max retries"
+    try:
+        payload = call_with_retry(
+            _fetch_once,
+            is_retryable=is_transient_source_error,
+            max_attempts=MAX_RETRIES,
+            base_delay=BACKOFF_BASE,
+        )
+    except TransientSourceError:
+        # Only escapes call_with_retry once every attempt came back transient.
+        return None, "Failed after max retries"
+    except (PermanentSourceError, ParseShapeError) as e:
+        return None, str(e)
+    return payload, None
 
 
 # --- RL11: shared negative-ledger helpers ------------------------------------
@@ -357,24 +371,94 @@ def enrich_batch(records: list[dict], batch_limit: int = 30,
 
 
 if __name__ == "__main__":
-    # Self-check (N2): retry policy decisions, fully offline
+    # Self-check (N2/RL8): shared retry policy + typed-error flow, offline
     assert issubclass(httpx.TimeoutException, httpx.TransportError)
-    assert _should_retry(httpx.ConnectTimeout("timed out"), None) is True
-    assert _should_retry(httpx.ReadTimeout("timed out"), None) is True
-    assert _should_retry(httpx.ConnectError("transport down"), None) is True
-    assert _should_retry(None, 500) is True
-    assert _should_retry(None, 503) is True
-    assert _should_retry(None, 400) is False      # client error -> fail fast
-    assert _should_retry(None, 404) is False
-    assert _should_retry(ValueError("bad json"), 200) is False  # JSON fail fast
-    assert _should_retry(KeyError("bug"), None) is False        # unexpected exc
-    assert _should_retry(None, None) is False
+    assert should_retry(httpx.ConnectTimeout("timed out"), None) is True
+    assert should_retry(httpx.ReadTimeout("timed out"), None) is True
+    assert should_retry(httpx.ConnectError("transport down"), None) is True
+    assert should_retry(None, 500) is True
+    assert should_retry(None, 503) is True
+    assert should_retry(None, 400) is False      # client error -> fail fast
+    assert should_retry(None, 404) is False
+    assert should_retry(ValueError("bad json"), 200) is False  # JSON fail fast
+    assert should_retry(KeyError("bug"), None) is False        # unexpected exc
+    assert should_retry(None, None) is False
     # exception wins over status when both are supplied
-    assert _should_retry(httpx.ReadTimeout("t"), 400) is True
+    assert should_retry(httpx.ReadTimeout("t"), 400) is True
+
+    # RL8: the typed error family drives census flow control internally
+    for cls in (TransientSourceError, PermanentSourceError, ParseShapeError):
+        assert issubclass(cls, SourceError)
+        assert cls("boom", source="census").source == "census"
+    assert is_transient_source_error(TransientSourceError("t")) is True
+    assert is_transient_source_error(PermanentSourceError("p")) is False
+    assert is_transient_source_error(ParseShapeError("s")) is False
+    assert is_retryable_status(500) is True
+    assert is_retryable_status(499) is False
 
     # B3: rate limit is a positive constant shared with pipeline backfill
     assert GEOCODE_RATE_LIMIT_S > 0
     assert enrich_batch.__doc__  # batch entry point documented
+
+    # Offline round trips through the REAL request path (MockTransport; the
+    # backoff sleeper is stubbed so multi-attempt cases cost no wall time).
+    _orig_sleep = net_retry._sleep
+    net_retry._sleep = lambda _seconds: None  # noqa: E731
+
+    def _always(outcome):
+        hits = []
+
+        def handler(request):
+            hits.append(1)
+            if isinstance(outcome, BaseException):
+                raise outcome
+            if isinstance(outcome, httpx.Response):
+                return outcome
+            return httpx.Response(outcome)
+        return handler, hits
+
+    try:
+        ok_handler, _ = _always(httpx.Response(
+            200, json={"result": {"addressMatches": [
+                {"coordinates": {"x": -96.9, "y": 32.6}}]}}))
+        payload, err = _request_json(
+            CENSUS_ADDR_URL, {"address": "x"}, 15,
+            transport=httpx.MockTransport(ok_handler))
+        assert err is None and payload["result"]["addressMatches"]
+
+        handler, hits = _always(404)
+        assert _request_json(
+            CENSUS_ADDR_URL, {}, 15,
+            transport=httpx.MockTransport(handler)) == \
+            (None, "Census HTTP 404 — failing fast")
+        assert len(hits) == 1                       # 4xx: no second attempt
+
+        handler, hits = _always(503)
+        assert _request_json(
+            CENSUS_COORD_URL, {}, 15,
+            transport=httpx.MockTransport(handler)) == \
+            (None, "Failed after max retries")
+        assert len(hits) == MAX_RETRIES             # 5xx: every attempt spent
+
+        handler, hits = _always(httpx.ConnectError("refused"))
+        assert _request_json(
+            CENSUS_ADDR_URL, {}, 15,
+            transport=httpx.MockTransport(handler)) == \
+            (None, "Failed after max retries")
+        assert len(hits) == MAX_RETRIES             # transport exhaustion
+
+        junk_handler, _ = _always(httpx.Response(200,
+                                                 content=b"<html>nope</html>"))
+        assert _request_json(
+            CENSUS_ADDR_URL, {}, 15,
+            transport=httpx.MockTransport(junk_handler)) == \
+            (None, "Census returned invalid JSON")
+    finally:
+        net_retry._sleep = _orig_sleep
+
+    print("census.py: N2 retry policy self-check passed "
+          "(retry = timeouts/transport/5xx only; 4xx + JSON fail fast; "
+          "typed errors internalized, status strings unchanged)")
 
     # Self-check (RL11): negative-ledger policy, fully offline
     from datetime import datetime as _dt, timedelta as _td, timezone as _tz
@@ -411,14 +495,21 @@ if __name__ == "__main__":
           "(skip matrix + record/forgive round trip)")
 
     import inspect
-    src = inspect.getsource(_request_json)
-    loop = [ln for ln in src.splitlines() if "for attempt in range" in ln]
+    # Structural N2 audit now targets the SHARED engine: exactly one attempt
+    # loop, exactly one inter-attempt sleep, and the fail-fast raise sits
+    # before it — so neither the final attempt nor a non-retryable failure
+    # ever sleeps.
+    engine_src = inspect.getsource(net_retry.call_with_retry)
+    loop = [ln for ln in engine_src.splitlines()
+            if "for attempt in range" in ln]
     assert len(loop) == 1
-    tail = src.split("_sleep_backoff(attempt)")[1]
-    assert "time.sleep" not in tail, "terminal sleep after final attempt (N2 violation)"
+    assert engine_src.count("_sleep(") == 1
+    tail_after_call = engine_src.split("return fn()", 1)[1]
+    assert "raise" in tail_after_call.split("_sleep(")[0], \
+        "fail-fast raise must precede the inter-attempt sleep (N2 violation)"
 
     print("census.py: N2 retry policy self-check passed "
-          "(retry = timeouts/transport/5xx only; 4xx + JSON fail fast)")
+          "(engine audit: one loop, one inter-attempt sleep, no terminal sleep)")
 
     # Live smoke test: geocode a known DFW address (graceful when offline)
     result = geocode_address("10022 Plainsman Ln, Frisco, TX 75035")

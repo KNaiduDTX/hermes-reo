@@ -25,11 +25,13 @@ from bs4 import BeautifulSoup
 from playwright.async_api import async_playwright
 
 from .base import SourceAdapter, NormalizedLead, SourceProvenance
+from ..source_registry import assert_registry_sync, require_endpoint
 import logging
 
 _log = logging.getLogger(__name__)
 
-BASE_URL = "https://apps2.collincountytx.gov/ForeclosureNotices"
+# TD3: derived from SOURCE-REGISTRY at import — no hardcoded portal literal.
+BASE_URL = require_endpoint("collin", "foreclosure_notice").url
 UA = "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
 
 DETAILS_STATUS_OK = "ok"
@@ -239,6 +241,12 @@ if __name__ == "__main__":
     import ast
     import inspect
     from src.adapters.base import NormalizedLead
+
+    # Self-check (TD3): BASE_URL is registry-derived; assert the whole
+    # adapter-constant <-> REGISTRY binding table holds.
+    assert_registry_sync()
+    print("collin_foreclosure.py: PASS — BASE_URL derived from SOURCE-REGISTRY "
+          "(assert_registry_sync)")
 
     # Self-check (S6): error payloads are classified, ok data passes through
     assert _details_status({"error": "HTTP 500"}) == DETAILS_STATUS_ERROR

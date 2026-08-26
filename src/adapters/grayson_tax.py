@@ -17,21 +17,23 @@ from bs4 import BeautifulSoup
 from playwright.async_api import async_playwright, Error as PlaywrightError
 
 from .base import SourceAdapter, NormalizedLead, SourceProvenance
+from ..source_registry import assert_registry_sync, require_endpoint
 import logging
 
 _log = logging.getLogger(__name__)
 
-# Known Grayson endpoints
+# Known Grayson endpoints — TD3: every URL below is DERIVED from
+# SOURCE-REGISTRY at import; this module carries no hardcoded portal literals.
 # VERIFIED Aug 20 2026: taxsearch.co.grayson.tx.us:8443 is DNS NXDOMAIN (dead subdomain)
 # The Grayson county site (co.grayson.tx.us) returns 403 on /page/tax.sale
 # No dedicated tax sale page exists on the county website
 # Tax sales must be handled via Sheriff's office or Tax Assessor directly (phone/in-person)
 # Tax Assessor-Collector portal: grayson.propertytaxpayments.net (payments only, no sales)
-TAX_SALE_URL = "https://taxsearch.co.grayson.tx.us:8443/Sales/ssale"  # DEAD — DNS NXDOMAIN
-COUNTY_TAX_PAGE = "https://www.co.grayson.tx.us/page/tax.sale"  # 403 Forbidden
-SHERIFF_SALE_PAGE = "https://www.co.grayson.tx.us/page/gcso.home"  # Works but no sale listings
-TAX_ASSESSOR_PORTAL = "https://grayson.propertytaxpayments.net/landing-page-en-us"  # Payments only
-COUNTY_MAIN = "https://www.co.grayson.tx.us"
+TAX_SALE_URL = require_endpoint("grayson", "tax_sale").url              # DEAD — DNS NXDOMAIN
+COUNTY_TAX_PAGE = require_endpoint("grayson", "county_tax_page").url    # 403 Forbidden
+SHERIFF_SALE_PAGE = require_endpoint("grayson", "sheriff_sale").url     # Works but no sale listings
+TAX_ASSESSOR_PORTAL = require_endpoint("grayson", "tax_assessor_portal").url  # Payments only
+COUNTY_MAIN = require_endpoint("grayson", "county_site").url
 UA = "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36"
 
 
@@ -125,7 +127,7 @@ def _parse_county_tax_page(html: str) -> list[dict]:
         if href:
             properties.append({
                 "link_text": text,
-                "url": href if href.startswith("http") else f"https://www.co.grayson.tx.us{href}",
+                "url": href if href.startswith("http") else f"{COUNTY_MAIN}{href}",
                 "source": "grayson_county_page",
             })
 
@@ -186,6 +188,12 @@ class GraysonTaxAdapter(SourceAdapter):
 
 
 if __name__ == "__main__":
+    # Self-check (TD3): all five URL constants are registry-derived; assert
+    # the whole adapter-constant <-> REGISTRY binding table holds.
+    assert_registry_sync()
+    print("grayson_tax.py: PASS — endpoint constants derived from SOURCE-REGISTRY "
+          "(assert_registry_sync)")
+
     # Self-check: URL constants
     assert "taxsearch" in TAX_SALE_URL
     assert "co.grayson" in COUNTY_TAX_PAGE

@@ -118,37 +118,16 @@ def recommend_deal(cpr: CPR, underwrite: UnderwriteResult, pricing: PricingResul
     return "PROCEED", blockers, cautions
 
 
-def render_memo(cpr: CPR, underwrite: UnderwriteResult, pricing: PricingResult,
-                review: Optional["ReviewResult"] = None) -> str:
-    """Render a deterministic deal memo in Markdown.
-
-    Sections (spec §8):
-    1. Header
-    2. Property snapshot
-    3. Distress & legal state
-    4. Valuation
-    5. Underwrite
-    6. Pricing
-    7. Exit & disposition plan
-    8. Risk register
-    9. Compliance checklist
-    10. Recommendation + gate trail
-
-    `review` (optional ReviewResult) feeds the recommendation gate; when it
-    is omitted the recommendation is capped at CONDITIONAL (HITL).
-    """
-    lines = []
-    now = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
-
-    # 1. Header
+def _render_header(lines: list, cpr: CPR, now: str, sale: str) -> None:
+    """Section 1 — Header."""
     lines.append(f"# DEAL MEMO — {cpr.parcel_id} — {cpr.situs_address} — {cpr.county.title()} County")
     lines.append(f"**Deal type:** {cpr.deal_type} | **Channel:** {cpr.channel} | **Date:** {now}")
-    parsed_sale = parse_date_any(_unwrap(cpr.sale_date, None))
-    sale = parsed_sale.isoformat() if parsed_sale else "N/A"
     lines.append(f"**Sale date:** {sale} | **Blast tier:** {cpr.blast_tier.name}")
     lines.append("")
 
-    # 2. Property snapshot
+
+def _render_snapshot(lines: list, cpr: CPR) -> None:
+    """Section 2 — Property snapshot."""
     lines.append("## Property Snapshot")
     lines.append(f"| Field | Value | Source | Confidence |")
     lines.append(f"|-------|-------|--------|------------|")
@@ -174,7 +153,9 @@ def render_memo(cpr: CPR, underwrite: UnderwriteResult, pricing: PricingResult,
         lines.append(f"| {label} | {v} | {s} | {c} |")
     lines.append("")
 
-    # 3. Distress & legal state
+
+def _render_distress(lines: list, cpr: CPR, sale: str) -> None:
+    """Section 3 — Distress & legal state."""
     lines.append("## Distress & Legal State")
     lines.append(f"- **NOD/NOS status:** {_unwrap(cpr.nod_status, 'N/A')}")
     lines.append(f"- **Sale date:** {sale}")
@@ -193,7 +174,9 @@ def render_memo(cpr: CPR, underwrite: UnderwriteResult, pricing: PricingResult,
         lines.append("### Encumbrance Stack\n_No liens recorded — GATE-LEGAL-LIEN required before bidding._")
     lines.append("")
 
-    # 4. Valuation
+
+def _render_valuation(lines: list, cpr: CPR) -> None:
+    """Section 4 — Valuation."""
     lines.append("## Valuation")
     if cpr.valuation:
         v = cpr.valuation
@@ -214,7 +197,9 @@ def render_memo(cpr: CPR, underwrite: UnderwriteResult, pricing: PricingResult,
         lines.append("_Valuation not yet performed — GATE-VAL required._")
     lines.append("")
 
-    # 5. Underwrite
+
+def _render_underwrite(lines: list, underwrite: UnderwriteResult) -> None:
+    """Section 5 — Underwrite."""
     lines.append("## Underwrite")
     lines.append(f"- **Model:** {underwrite.model}")
     lines.append(f"- **ARV:** ${underwrite.arv:,.0f}")
@@ -239,7 +224,9 @@ def render_memo(cpr: CPR, underwrite: UnderwriteResult, pricing: PricingResult,
         lines.append(f"- **BRRRR recycle:** {underwrite.refi_recycle_pct:.1%}")
     lines.append("")
 
-    # 6. Pricing
+
+def _render_pricing(lines: list, pricing: PricingResult) -> None:
+    """Section 6 — Pricing."""
     lines.append("## Pricing")
     lines.append(f"- **MAO:** ${pricing.mao:,.0f}")
     lines.append(f"- **Bid ceiling:** ${pricing.bid_ceiling:,.0f}")
@@ -272,7 +259,9 @@ def render_memo(cpr: CPR, underwrite: UnderwriteResult, pricing: PricingResult,
             lines.append(f"| {cell.arv_delta:+.0%} | {cell.rehab_delta:+.0%} | ${cell.profit:,.0f} | {cell.margin:.1%} |")
     lines.append("")
 
-    # 7. Exit & disposition plan
+
+def _render_exit(lines: list, cpr: CPR, underwrite: UnderwriteResult) -> None:
+    """Section 7 — Exit & disposition plan."""
     lines.append("## Exit & Disposition Plan")
     lines.append(f"- **Exit strategy:** {underwrite.model}")
     if cpr.deal_type == "DT-WHOLESALE":
@@ -283,7 +272,9 @@ def render_memo(cpr: CPR, underwrite: UnderwriteResult, pricing: PricingResult,
         lines.append("- **Disposition:** fix-and-flip or BRRRR")
     lines.append("")
 
-    # 8. Risk register
+
+def _render_risks(lines: list, cpr: CPR, pricing: PricingResult) -> None:
+    """Section 8 — Risk register."""
     lines.append("## Risk Register")
     risks = []
     if cpr.valuation and cpr.valuation.gate_val_verdict != "pass":
@@ -310,7 +301,9 @@ def render_memo(cpr: CPR, underwrite: UnderwriteResult, pricing: PricingResult,
         lines.append("- No risks identified")
     lines.append("")
 
-    # 9. Compliance checklist
+
+def _render_compliance(lines: list, cpr: CPR) -> None:
+    """Section 9 — Compliance checklist."""
     lines.append("## Compliance Checklist")
     lines.append(f"- [ ] Buyer eligibility verified (Written Statement / RealAuction registration)")
     if cpr.deal_type == "DT-WHOLESALE":
@@ -320,7 +313,11 @@ def render_memo(cpr: CPR, underwrite: UnderwriteResult, pricing: PricingResult,
     lines.append(f"- [ ] LEGAL-RULES version verified ({datetime.now(timezone.utc).strftime('%Y-%m-%d')})")
     lines.append("")
 
-    # 10. Recommendation + gate trail
+
+def _render_recommendation(lines: list, cpr: CPR, underwrite: UnderwriteResult,
+                           pricing: PricingResult,
+                           review: Optional["ReviewResult"]) -> None:
+    """Section 10 — Recommendation + gate trail."""
     lines.append("## Recommendation")
     verdict, blockers, cautions = recommend_deal(cpr, underwrite, pricing, review)
     if verdict == "DO NOT PROCEED":
@@ -340,6 +337,43 @@ def render_memo(cpr: CPR, underwrite: UnderwriteResult, pricing: PricingResult,
     lines.append(f"- GATE-LEGAL-LIEN: {'not run' if not cpr.liens else 'lien stack present'}")
     lines.append(f"- AGENT-REV: {review.overall if review is not None else 'not run'}")
     lines.append(f"- LEGAL-RULES: v1.0 (verified_by: spec_research)")
+
+
+def render_memo(cpr: CPR, underwrite: UnderwriteResult, pricing: PricingResult,
+                review: Optional["ReviewResult"] = None) -> str:
+    """Render a deterministic deal memo in Markdown.
+
+    Sections (spec §8), each built by its own helper, always in this order
+    so memos stay comparable and portfolio analytics stay trivial:
+    1. Header (_render_header)
+    2. Property snapshot (_render_snapshot)
+    3. Distress & legal state (_render_distress)
+    4. Valuation (_render_valuation)
+    5. Underwrite (_render_underwrite)
+    6. Pricing (_render_pricing)
+    7. Exit & disposition plan (_render_exit)
+    8. Risk register (_render_risks)
+    9. Compliance checklist (_render_compliance)
+    10. Recommendation + gate trail (_render_recommendation)
+
+    `review` (optional ReviewResult) feeds the recommendation gate; when it
+    is omitted the recommendation is capped at CONDITIONAL (HITL).
+    """
+    lines: list = []
+    now = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
+    parsed_sale = parse_date_any(_unwrap(cpr.sale_date, None))
+    sale = parsed_sale.isoformat() if parsed_sale else "N/A"
+
+    _render_header(lines, cpr, now, sale)
+    _render_snapshot(lines, cpr)
+    _render_distress(lines, cpr, sale)
+    _render_valuation(lines, cpr)
+    _render_underwrite(lines, underwrite)
+    _render_pricing(lines, pricing)
+    _render_exit(lines, cpr, underwrite)
+    _render_risks(lines, cpr, pricing)
+    _render_compliance(lines, cpr)
+    _render_recommendation(lines, cpr, underwrite, pricing, review)
 
     return "\n".join(lines)
 

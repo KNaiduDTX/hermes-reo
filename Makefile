@@ -42,7 +42,7 @@ lint-full:
 test:
 	$(PY) -m pytest
 
-# Live tier module sits at repo root while pytest.ini sets `testpaths = tests`,
+# Live tier module sits at repo root while pyproject [tool.pytest.ini_options] sets testpaths=tests,
 # so bare `pytest -m live` would collect nothing (exit 5) — the module is named
 # explicitly. CLI `-m live` overrides the default addopts filter for this run.
 test-live:

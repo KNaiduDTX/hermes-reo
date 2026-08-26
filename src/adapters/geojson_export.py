@@ -7,6 +7,9 @@ marker colors/symbols, and census tract overlay for field operations.
 from __future__ import annotations
 import re
 import statistics
+from typing import Any
+
+from ..cpr import CPR
 from ..io_utils import write_json
 from .route_optimizer import RouteStop
 
@@ -20,48 +23,52 @@ def _parse_value(val) -> float:
     return float(cleaned) if cleaned else 0.0
 
 
-def cpr_to_geojson(cprs: list) -> dict:
+def cpr_to_geojson(cprs: list[CPR]) -> dict[str, Any]:
     """Export CPRs as a GeoJSON FeatureCollection.
 
     Each CPR becomes a Point feature with properties for map display.
-    """
-    features = []
-    city_pps = {}  # city → [price_per_sqft values]
 
-    # First pass: collect price/sqft for city medians
+    TD9: the legacy two-pass loop duplicated the coordinate gate and the
+    CAD/sqft unwrap (one pass for city medians, one for feature building);
+    a single extraction pass now unpacks each coordinate-bearing CPR exactly
+    once and the city medians are derived from the collected samples.
+
+    TD1: characteristic reads go through CPR.get(), the provenance-unwrapping
+    accessor over declared fields — so receipted gis_lat/gis_lng feed real
+    numbers into the gate and geometry instead of leaking the wrapper's
+    str() form, matching find_deals.build_geojson_from_deals' row-level
+    coordinate predicate exactly.
+    """
+    from ..synthesis import get_city  # lazy: keeps the adapter import graph light
+
+    # Single extraction pass: one unwrap per CPR, nothing duplicated.
+    samples = []  # (cpr, lat, lng, val, sqft, pps, city) — gate-passing only
     for cpr in cprs:
-        lat = cpr.gis_lat
-        lng = cpr.gis_lng
+        lat = cpr.get("gis_lat")
+        lng = cpr.get("gis_lng")
         if not lat or not lng or lat == 0 or lng == 0:
             continue
-        val = cpr.cad_appraised_value.value if cpr.cad_appraised_value else 0.0
-        sqft = cpr.improvement_sqft.value if cpr.improvement_sqft else 0
-        if val and val > 0 and sqft and sqft > 0:
-            from ..synthesis import get_city
-            city = get_city(cpr.situs_address)
-            city_pps.setdefault(city, []).append(val / sqft)
+        val = cpr.get("cad_appraised_value", 0.0)
+        sqft = cpr.get("improvement_sqft", 0)
+        pps = val / sqft if (val and val > 0 and sqft and sqft > 0) else None
+        samples.append((cpr, lat, lng, val, sqft, pps,
+                        get_city(cpr.situs_address)))
 
+    city_pps: dict = {}  # city → [price_per_sqft values]
+    for _, _, _, _, _, pps, city in samples:
+        if pps is not None:
+            city_pps.setdefault(city, []).append(pps)
     city_medians = {c: statistics.median(pps) for c, pps in city_pps.items() if pps}
 
-    for cpr in cprs:
-        lat = cpr.gis_lat
-        lng = cpr.gis_lng
-        if not lat or not lng or lat == 0 or lng == 0:
-            continue
-
-        from ..synthesis import get_city
-        city = get_city(cpr.situs_address)
-        val = cpr.cad_appraised_value.value if cpr.cad_appraised_value else 0.0
-        sqft = cpr.improvement_sqft.value if cpr.improvement_sqft else 0
-        pps = val / sqft if (val and val > 0 and sqft and sqft > 0) else None
-
+    features = []
+    for cpr, lat, lng, val, sqft, pps, city in samples:
         city_med = city_medians.get(city, 0)
         pps_discount = ((city_med - pps) / city_med * 100) if (pps and city_med and city_med > 0) else 0.0
 
         # Investment category
         is_corporate = bool(re.search(
             r'\b(LLC|LP|TRUST|CORP|INC|HOLDINGS|PARTNERS|BANK|HOA|LTD|LLP)\b',
-            str(cpr.owner_name.value if cpr.owner_name else ""), re.IGNORECASE
+            str(cpr.get("owner_name", "")), re.IGNORECASE
         ))
         if is_corporate or (val and val >= 1_000_000):
             category = "Commercial"
@@ -95,8 +102,8 @@ def cpr_to_geojson(cprs: list) -> dict:
                 "appraised_value": val,
                 "price_per_sqft": round(pps, 2) if pps else None,
                 "market_pps_discount_pct": round(pps_discount, 2),
-                "year_built": cpr.year_built.value if cpr.year_built else None,
-                "owner": cpr.owner_name.value if cpr.owner_name else "Unknown",
+                "year_built": cpr.get("year_built"),
+                "owner": cpr.get("owner_name", "Unknown"),
                 "deal_type": cpr.deal_type,
                 "blast_tier": cpr.blast_tier.name if hasattr(cpr.blast_tier, 'name') else str(cpr.blast_tier),
             },
@@ -132,6 +139,23 @@ if __name__ == "__main__":
     assert props["city"] == "Frisco"
     assert props["appraised_value"] == 730_673
     assert props["price_per_sqft"] is not None
+    assert geojson["features"][0]["geometry"]["coordinates"] == [-96.794, 33.179]
+
+    # TD1: provenance-wrapped coordinates unwrap to plain numbers — the gate
+    # admits them and the geometry carries [lng, lat] floats, never the
+    # ProvenanceField str() form the legacy export serialized.
+    cpr.set_field("gis_lat", 33.5, "test", 0.90)
+    cpr.set_field("gis_lng", -96.5, "test", 0.90)
+    fc_wrapped = cpr_to_geojson([cpr])
+    coords = fc_wrapped["features"][0]["geometry"]["coordinates"]
+    assert coords == [-96.5, 33.5], coords
+    assert all(isinstance(c, float) for c in coords), coords
+
+    # A zeroed receipt is excluded by the same unwrapped gate (no feature).
+    cpr.set_field("gis_lat", 0, "test", 0.90)
+    assert len(cpr_to_geojson([cpr])["features"]) == 0
+
     print(f"geojson_export.py: exported {len(geojson['features'])} feature(s)")
     print(f"  Category: {props['category']}, PPS: ${props['price_per_sqft']:.2f}/sqft")
+    print("geojson_export.py: TD1 — provenance-wrapped coordinates verified")
     print("geojson_export.py: all self-checks passed")

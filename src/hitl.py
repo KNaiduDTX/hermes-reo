@@ -37,6 +37,7 @@ from .cpr import (
     ProvenanceField,
     pv_value,
 )
+from .cpr import coerce_blast_tier_like
 from .dates import parse_date_any
 from .io_utils import write_json
 from .valuation import GateValResult, ValuationObject, attach_valuation, gate_val
@@ -102,87 +103,17 @@ def _restore_provenance(d: dict) -> ProvenanceField:
 
 
 def load_cpr(path: str) -> CPR:
-    """Load a saved CPR dict (cpr.to_dict() output) back into a CPR.
+    """Load a saved CPR dict (cpr.to_dict() output) for a HITL valuation run.
 
-    Reconstructs enough state for a HITL valuation run: identity fields,
-    provenance-wrapped fields (restored directly — no new ledger receipts for
-    rehydration), the append-only ledger itself, liens via add_lien (receipted,
-    chained onto the restored ledger) and pipeline state. The stored valuation
-    is deliberately ignored: the HITL run replaces it wholesale.
+    Thin wrapper over CPR.from_dict (TD5): identity, provenance fields,
+    append-only ledger and liens are reconstructed there. The stored
+    valuation is deliberately DROPPED here — the HITL run replaces it
+    wholesale; missing blast tier defaults to T2.
     """
     with open(path, "r", encoding="utf-8") as f:
         raw = json.load(f)
-    if not isinstance(raw, dict):
-        raise ValueError(f"{path}: expected a CPR dict at top level, got {type(raw).__name__}")
-
-    cpr = CPR()
-    declared = {f.name for f in dataclasses.fields(CPR)}
-
-    # Pass 1 — plain + provenance fields (skip the structured keys handled below).
-    for key, val in raw.items():
-        if key in ("valuation", "liens", "ledger", "column", "blast_tier",
-                   "lien_lookup_status"):
-            continue
-        if key == "lien_priority_ranking":
-            cpr.lien_priority_ranking = [str(x) for x in (val or [])]
-            continue
-        if _is_provenance_dict(val):
-            setattr(cpr, key, _restore_provenance(val))  # extras like deed_number OK
-        elif key in declared or not isinstance(val, (dict, list)):
-            try:
-                setattr(cpr, key, val)
-            except (AttributeError, TypeError) as exc:
-                _warn(f"{path}: could not restore field {key!r}: {exc}")
-
-    # Pass 2 — ledger first so add_lien receipts chain onto restored history.
-    for entry in raw.get("ledger") or []:
-        if not isinstance(entry, dict):
-            continue
-        e = ProvenanceEntry(
-            field_name=str(entry.get("field_name") or ""),
-            old_value=entry.get("old_value"),
-            new_value=entry.get("new_value"),
-            source=str(entry.get("source") or ""),
-            timestamp=str(entry.get("timestamp") or ""),
-            prev_hash=str(entry.get("prev_hash") or ""),
-            note=str(entry.get("note") or ""),
-        )
-        e.entry_hash = str(entry.get("entry_hash") or "")
-        cpr.ledger.append(e)
-
-    # Pass 3 — liens via add_lien, per contract (receipted, chain-preserving).
-    for ld in raw.get("liens") or []:
-        if not isinstance(ld, dict):
-            continue
-        lien = LienRecord(
-            lien_type=str(ld.get("lien_type") or "unknown"),
-            amount=(float(ld["amount"]) if ld.get("amount") is not None else None),
-            recording_date=ld.get("recording_date"),
-            lender=ld.get("lender"),
-            priority=int(ld.get("priority") or 0),
-            survives_foreclosure=bool(ld.get("survives_foreclosure")),
-            survives_tax_sale=bool(ld.get("survives_tax_sale")),
-        )
-        cpr.add_lien(lien, source="hitl:cpr_rehydrate", confidence=0.0)
-
-    # Pass 4 — pipeline state.
-    cpr.blast_tier = coerce_blast_tier(raw.get("blast_tier"), default=BlastTier.T2)
-    col_val = raw.get("column")
-    if col_val is not None:
-        try:
-            cpr.column = CPRColumn(str(col_val))
-        except ValueError:
-            _warn(f"{path}: unrecognized column {col_val!r}; keeping {cpr.column.value}")
-    status = raw.get("lien_lookup_status")
-    if status is not None:
-        try:
-            cpr.lien_lookup_status = str(status)
-        except ValueError:
-            _warn(f"{path}: invalid lien_lookup_status {status!r}; keeping 'not_run'")
-    if raw.get("dead_reason"):
-        cpr.dead_reason = str(raw["dead_reason"])
-
-    return cpr
+    return CPR.from_dict(raw, path_label=path, include_valuation=False,
+                         default_blast_tier=BlastTier.T2, on_warn=_warn)
 
 
 def intake_comps(comp_dicts: list[dict]) -> list[CompRecord]:

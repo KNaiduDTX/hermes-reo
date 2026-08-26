@@ -192,11 +192,17 @@ def enrich_from_collin_details(lead: NormalizedLead) -> CPR:
         cpr.set_field("gis_lat", lead.latitude, "collin_foreclosure_detail", 0.95)
         cpr.set_field("gis_lng", lead.longitude, "collin_foreclosure_detail", 0.95)
 
-    _enrich_common(cpr, raw, "collin_foreclosure_detail", 0.95)
+    # RL7/S6: a flagged-failed detail scrape is an error payload, NOT data —
+    # receipt the failure and skip property extraction entirely instead of
+    # fabricating "Unknown" characteristics from .get() defaults.
+    if _details_scrape_failed(lead.raw_data):
+        _mark_detail_scrape_error(cpr, lead.raw_data, "collin_foreclosure_detail")
+    else:
+        _enrich_common(cpr, raw, "collin_foreclosure_detail", 0.95)
 
-    # Collin-specific: Mapsco, Deed Date, scanned notice image
-    cpr.set_field("mapsco", raw.get("property_info", {}).get("Mapsco", "Unknown"),
-                  "collin_foreclosure_detail", 0.50)
+        # Collin-specific: Mapsco, Deed Date, scanned notice image
+        cpr.set_field("mapsco", raw.get("property_info", {}).get("Mapsco", "Unknown"),
+                      "collin_foreclosure_detail", 0.50)
 
     cpr.move_column(CPRColumn.ENRICHED)
     return cpr
@@ -232,14 +238,19 @@ def enrich_from_dallas_details(lead: NormalizedLead) -> CPR:
     if lead.raw_data.get("city"):
         cpr.set_field("city", lead.raw_data.get("city"), "dallas_foreclosure_pdf", 0.70)
 
-    _enrich_common(cpr, details, "dallas_foreclosure_pdf", 0.70)
+    # RL7/S6: same failed-scrape guard as the Collin path — mark, don't
+    # extract (city/GIS above come from the lead/filename, not the payload).
+    if _details_scrape_failed(raw):
+        _mark_detail_scrape_error(cpr, raw, "dallas_foreclosure_pdf")
+    else:
+        _enrich_common(cpr, details, "dallas_foreclosure_pdf", 0.70)
 
-    # DCAD cross-reference: if no improvement data, flag for on-demand lookup.
-    # DCAD requires Playwright (browser automation) — slow — so it is never
-    # run during bulk enrichment; call cross_reference_dcad(cpr) explicitly.
-    imp = details.get("improvement_info", {})
-    if imp.get("Improvement Area") in (None, "Unknown", "") and cpr.situs_address != "Unknown":
-        cpr.set_field("dcad_cross_ref_needed", True, "enrichment", 1.0)
+        # DCAD cross-reference: if no improvement data, flag for on-demand lookup.
+        # DCAD requires Playwright (browser automation) — slow — so it is never
+        # run during bulk enrichment; call cross_reference_dcad(cpr) explicitly.
+        imp = details.get("improvement_info", {})
+        if imp.get("Improvement Area") in (None, "Unknown", "") and cpr.situs_address != "Unknown":
+            cpr.set_field("dcad_cross_ref_needed", True, "enrichment", 1.0)
 
     cpr.move_column(CPRColumn.ENRICHED)
     return cpr
@@ -307,7 +318,12 @@ def enrich_from_raw_record(record: dict) -> CPR:
 
     source = f"{county}_foreclosure"
     confidence = 0.95 if county == "collin" else 0.70
-    _enrich_common(cpr, details, source, confidence)
+    # RL7/S6: legacy dataset rows can carry the details_status flag too —
+    # never extract characteristics out of a failed-scrape error payload.
+    if _details_scrape_failed(record):
+        _mark_detail_scrape_error(cpr, record, source)
+    else:
+        _enrich_common(cpr, details, source, confidence)
 
     cpr.move_column(CPRColumn.ENRICHED)
     return cpr
@@ -340,6 +356,77 @@ def _clean_flat_value(val):
     return val
 
 
+# ---------------------------------------------------------------------------
+# RL7/S6: failed detail scrapes. collin_foreclosure flags them by writing
+# raw_data["details_status"]="error" (the payload itself is {"error": ...},
+# NOT parsed data). Consumers must receipt the failure on the CPR and skip
+# property-field extraction — an error payload's .get() defaults would
+# otherwise enrich to ENRICHED full of fabricated "Unknown"s.
+DETAILS_STATUS_ERROR = "error"
+
+
+def _details_scrape_failed(raw: object) -> bool:
+    """True when the record/lead carries the details_status="error" flag."""
+    return isinstance(raw, dict) and \
+        str(raw.get("details_status") or "").lower() == DETAILS_STATUS_ERROR
+
+
+def _mark_detail_scrape_error(cpr: CPR, raw: dict, source: str) -> None:
+    """Receipt the failed scrape as a provenance error marker (RL7).
+
+    The ledger entry makes "detail data unavailable" explicit — downstream
+    readers see the failure instead of mistaking skipped fields for real
+    Unknowns. The underlying scrape message rides along when present.
+    """
+    err = "detail scrape failed"
+    details = raw.get("details") if isinstance(raw, dict) else None
+    if isinstance(details, dict) and details.get("error"):
+        err = f"detail scrape failed: {details['error']}"
+    elif isinstance(raw, dict) and raw.get("details_error"):
+        err = f"detail scrape failed: {raw['details_error']}"
+    cpr.set_field("detail_scrape_error", err, source, 1.0)
+
+
+# TD9-flatmap: declarative flat-row mapping. One table, one loop — each entry
+# is (record_key, cpr_field, parser, confidence, extra):
+#   record_key  key read off the flat current_deals.json row
+#   cpr_field   provenance-managed CPR attribute to receive it
+#   parser      cleaner/converter applied to the cleaned value; None =
+#               passthrough string
+#   confidence  provenance strength recorded on the receipt
+#   extra       optional modifier tag:
+#                 "gate_on_clean" — gate on the cleaned row value instead of
+#                   the parsed one (pool: "N"/"False" must still land False)
+#                 "wrap_str" — store str(value) (census fields stay strings)
+_FLAT_SOURCE_CONFIDENCE = 0.70  # flat-row provenance strength
+
+_FLAT_FIELD_MAP = [
+    # --- characteristics ---------------------------------------------------
+    ("sqft", "improvement_sqft", _parse_int, _FLAT_SOURCE_CONFIDENCE, None),
+    ("beds", "beds", _parse_int, _FLAT_SOURCE_CONFIDENCE, None),
+    ("baths", "baths", _parse_float, _FLAT_SOURCE_CONFIDENCE, None),
+    ("year_built", "year_built", _parse_int, _FLAT_SOURCE_CONFIDENCE, None),
+    ("stories", "stories", _parse_int, _FLAT_SOURCE_CONFIDENCE, None),
+    ("pool", "pool", _parse_bool, _FLAT_SOURCE_CONFIDENCE, "gate_on_clean"),
+    # --- owner / property context ------------------------------------------
+    ("owner", "owner_name", None, _FLAT_SOURCE_CONFIDENCE, None),
+    ("property_type", "property_type", None, _FLAT_SOURCE_CONFIDENCE, None),
+    # --- CAD valuations (baseline provenance fields, not market ARV) -------
+    ("cad_value", "cad_appraised_value", _parse_float,
+     _FLAT_SOURCE_CONFIDENCE, None),
+    ("cad_value_2025", "cad_appraised_value_2025", _parse_float,
+     _FLAT_SOURCE_CONFIDENCE, None),
+    # --- jurisdiction -------------------------------------------------------
+    ("city", "city", None, _FLAT_SOURCE_CONFIDENCE, None),
+    # --- census context carried by earlier census/geocode passes ------------
+    ("census_tract", "census_tract", None, 0.95, "wrap_str"),
+    ("county_fips", "county_fips", None, 0.95, "wrap_str"),
+    # --- trustee-sale date (X5-adjudicated upstream; owner-deed dates never
+    #     surface here) — reduced confidence like the details-based paths ----
+    ("sale_date", "sale_date", None, _FLAT_SOURCE_CONFIDENCE * 0.8, None),
+]
+
+
 def enrich_from_flat_record(record: dict) -> CPR:
     """Enrich a CPR from a FLAT current_deals.json record (AUDIT D1 fix).
 
@@ -349,20 +436,22 @@ def enrich_from_flat_record(record: dict) -> CPR:
     (details/entry_id/property_address), so routing flat rows through it
     resolved every field to "Unknown" and --bulk-dcad silently no-op'd.
 
-    Mapping: parcel_id → identity, county lowercased, address → situs,
-    sqft/beds/baths/year_built/stories/pool set only when truthy and not a
-    placeholder, cad_value → cad_appraised_value provenance field, city,
-    mortgage_debt → estimated mortgage lien via the same pattern as the OCR
-    path in _enrich_common (ONLY when a positive number), lat/lng when both
-    nonzero. Confidence is 0.70 for the {county}_source fields.
+    Mapping: parcel_id → identity, county lowercased, address → situs; every
+    previously-handled field rides the declarative _FLAT_FIELD_MAP above
+    (cleaned → parsed → gated → set_field receipt). mortgage_debt → estimated
+    mortgage lien via the same pattern as the OCR path in _enrich_common
+    (ONLY when a positive number), lat/lng when both nonzero.
 
     None-safety contract: fields the record lacks are never set, so the
-    attribute stays None — callers keep using ``cpr.f.value if cpr.f else ...``.
-    enrich_from_raw_record is untouched and still owns the nested schema.
+    attribute stays None — callers use ``cpr.get(name, default)`` or keep the
+    ``cpr.f.value if cpr.f else ...`` idiom. Records flagged
+    details_status="error" (failed scrapes, RL7/S6) get the error marker and
+    NO property extraction at all — nothing from an error payload may become
+    a fabricated characteristic or lien.
     """
     county = str(record.get("county") or "unknown").lower()
     source = f"{county}_source"
-    confidence = 0.70  # flat-row provenance strength
+    confidence = _FLAT_SOURCE_CONFIDENCE
 
     cpr = CPR(
         parcel_id=str(record.get("parcel_id") or ""),
@@ -371,46 +460,25 @@ def enrich_from_flat_record(record: dict) -> CPR:
         channel="foreclosure_notice",
     )
 
-    # Characteristics — only set when the row actually carries usable values.
-    sqft = _parse_int(_clean_flat_value(record.get("sqft")))
-    if sqft:
-        cpr.set_field("improvement_sqft", sqft, source, confidence)
-    beds = _parse_int(_clean_flat_value(record.get("beds")))
-    if beds:
-        cpr.set_field("beds", beds, source, confidence)
-    baths = _parse_float(_clean_flat_value(record.get("baths")))
-    if baths:
-        cpr.set_field("baths", baths, source, confidence)
-    year_built = _parse_int(_clean_flat_value(record.get("year_built")))
-    if year_built:
-        cpr.set_field("year_built", year_built, source, confidence)
-    stories = _parse_int(_clean_flat_value(record.get("stories")))
-    if stories:
-        cpr.set_field("stories", stories, source, confidence)
-    pool = _clean_flat_value(record.get("pool"))
-    if pool:
-        cpr.set_field("pool", _parse_bool(pool), source, confidence)
+    # RL7/S6: a flagged-failed scrape is an error payload, not data — mark it
+    # and skip every property field below rather than fabricating Unknowns.
+    if _details_scrape_failed(record):
+        _mark_detail_scrape_error(cpr, record, source)
+        cpr.deal_type = "DT-AUCTION"
+        cpr.move_column(CPRColumn.ENRICHED)
+        return cpr
 
-    # Owner / property context
-    owner = _clean_flat_value(record.get("owner"))
-    if owner:
-        cpr.set_field("owner_name", owner, source, confidence)
-    ptype = _clean_flat_value(record.get("property_type"))
-    if ptype:
-        cpr.set_field("property_type", ptype, source, confidence)
-
-    # CAD valuations — baseline provenance fields (not market ARV)
-    cad_value = _parse_float(_clean_flat_value(record.get("cad_value")))
-    if cad_value:
-        cpr.set_field("cad_appraised_value", cad_value, source, confidence)
-    cad_2025 = _parse_float(_clean_flat_value(record.get("cad_value_2025")))
-    if cad_2025:
-        cpr.set_field("cad_appraised_value_2025", cad_2025, source, confidence)
-
-    # City
-    city = _clean_flat_value(record.get("city"))
-    if city:
-        cpr.set_field("city", city, source, confidence)
+    # Characteristics / owner / CAD / census / sale date — the mapped table.
+    for key, cpr_field, parser, field_confidence, extra in _FLAT_FIELD_MAP:
+        cleaned = _clean_flat_value(record.get(key))
+        if cleaned is None:
+            continue
+        value = parser(cleaned) if parser is not None else cleaned
+        if extra == "wrap_str":
+            value = str(value)
+        usable = bool(cleaned) if extra == "gate_on_clean" else bool(value)
+        if usable:
+            cpr.set_field(cpr_field, value, source, field_confidence)
 
     # Estimated lien from the flat mortgage_debt — SAME pattern as the OCR
     # path in _enrich_common: only when it parses to a positive number, and
@@ -441,22 +509,9 @@ def enrich_from_flat_record(record: dict) -> CPR:
         cpr.set_field("gis_lat", lat, source, 0.90)
         cpr.set_field("gis_lng", lng, source, 0.90)
 
-    # Census context carried by earlier census/geocode passes.
-    tract = _clean_flat_value(record.get("census_tract"))
-    if tract:
-        cpr.set_field("census_tract", str(tract), source, 0.95)
-    fips = _clean_flat_value(record.get("county_fips"))
-    if fips:
-        cpr.set_field("county_fips", str(fips), source, 0.95)
-
-    # Trustee-sale date (already adjudicated upstream; Collin owner-deed dates
-    # never surface here because analyze_deal stores X5-corrected values).
-    sale_date = _clean_flat_value(record.get("sale_date"))
-    if sale_date:
-        cpr.set_field("sale_date", sale_date, source, confidence * 0.8)
-
     # Distress state + DCAD flag (mirrors enrich_from_dallas_details).
     cpr.deal_type = "DT-AUCTION"
+    sqft = cpr.improvement_sqft.value if cpr.improvement_sqft else 0
     if county == "dallas" and not sqft and cpr.situs_address != "Unknown":
         cpr.set_field("dcad_cross_ref_needed", True, "enrichment", 1.0)
 
@@ -641,7 +696,8 @@ if __name__ == "__main__":
     assert cpr2.cad_appraised_value.value == 387000.0
     # X5: Dallas's prose date IS the trustee-sale date — stays in sale_date.
     assert cpr2.sale_date.value == "Tuesday, the 3rd day of March, 2026"
-    assert not hasattr(cpr2, "owner_deed_date")  # never fabricated for Dallas
+    # TD1: owner_deed_date is now a declared field; Dallas leaves it unset (None)
+    assert cpr2.get("owner_deed_date") is None  # never fabricated for Dallas
 
     # ---- D1 regression: FLAT current_deals.json rows -----------------------
     # Complete Dallas row — every field must land on the CPR.
@@ -679,7 +735,7 @@ if __name__ == "__main__":
     assert fc.improvement_sqft.source == "dallas_source"
     assert fc.improvement_sqft.confidence == 0.70  # dallas source-field confidence
     assert fc.column == CPRColumn.ENRICHED
-    assert not hasattr(fc, "dcad_cross_ref_needed")  # sqft present → no flag
+    assert fc.get("dcad_cross_ref_needed") is None  # sqft present → no flag (TD1 declared)
 
     # Sparse row with placeholder junk — must stay None-safe (no fabrication).
     flat_sparse = {

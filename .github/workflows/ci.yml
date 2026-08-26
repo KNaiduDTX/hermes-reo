@@ -66,7 +66,7 @@ jobs:
       - name: Install chromium (Playwright)
         run: playwright install chromium --with-deps
 
-      # The live tier lives in repo-root test_live_portals.py, but pytest.ini sets
+      # The live tier lives in repo-root test_live_portals.py, but pyproject.toml [tool.pytest.ini_options] sets
       # `testpaths = tests`, so bare `pytest -m live` collects nothing (exit 5);
       # naming the module fixes collection and the CLI `-m live` overrides the
       # default addopts filter (`not live and not recalc`) for this opt-in job only.

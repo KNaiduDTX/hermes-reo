@@ -19,11 +19,13 @@ from playwright.async_api import async_playwright, Error as PlaywrightError
 from .base import SourceAdapter, SourceProvenance
 from ..cpr import LienRecord
 from ..dates import parse_date_any
+from ..source_registry import assert_registry_sync, require_endpoint
 import logging
 
 _log = logging.getLogger(__name__)
 
-CLERK_URL = "https://collin.tx.publicsearch.us"
+# TD3: derived from SOURCE-REGISTRY at import — no hardcoded portal literal.
+CLERK_URL = require_endpoint("collin", "clerk").url
 UA = "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36"
 
 # Pagination (finding S2): the clerk results table is paginated; parse page 1
@@ -320,6 +322,12 @@ class CollinClerkAdapter(SourceAdapter):
 
 
 if __name__ == "__main__":
+    # Self-check (TD3): CLERK_URL is registry-derived; assert the whole
+    # adapter-constant <-> REGISTRY binding table holds.
+    assert_registry_sync()
+    print("collin_clerk.py: PASS — CLERK_URL derived from SOURCE-REGISTRY "
+          "(assert_registry_sync)")
+
     # Self-check: encumbrance type mapping
     assert ENCUMBRANCE_TYPES["DT"] == "mortgage"
     assert ENCUMBRANCE_TYPES["FTL"] == "irs_federal"

@@ -144,6 +144,22 @@ class LienRecord:
     survives_tax_sale: bool = False
 
 
+def coerce_blast_tier_like(value, default: "BlastTier") -> "BlastTier":
+    """Best-effort BlastTier coercion shared by from_dict callers."""
+    if value is None:
+        return default
+    try:
+        return BlastTier(int(value))
+    except (TypeError, ValueError):
+        if isinstance(value, str):
+            cleaned = value.strip().upper().split(".")[-1]
+            try:
+                return BlastTier[cleaned]
+            except KeyError:
+                pass
+    return default
+
+
 @dataclass
 class CPR:
     """Canonical Property Record — one per parcel, append-only."""
@@ -180,6 +196,36 @@ class CPR:
     tax_delinquent: Optional[ProvenanceField] = None
     tax_delinquent_amount: Optional[ProvenanceField] = None
     tax_suit_case_number: Optional[ProvenanceField] = None
+
+    # Distress detail (audit TD1: declared so tooling sees them; set_field
+    # still routes writes through the receipted provenance path)
+    taxing_entities: Optional[ProvenanceField] = None
+    deed_number: Optional[ProvenanceField] = None
+    owner_deed_date: Optional[ProvenanceField] = None
+    commercial: Optional[ProvenanceField] = None
+    stories: Optional[ProvenanceField] = None
+    pool: Optional[ProvenanceField] = None
+    isd: Optional[ProvenanceField] = None
+    mapsco: Optional[ProvenanceField] = None
+    census_tract: Optional[ProvenanceField] = None
+    census_block: Optional[ProvenanceField] = None
+    census_block_group: Optional[ProvenanceField] = None
+    county_fips: Optional[ProvenanceField] = None
+    state_fips: Optional[ProvenanceField] = None
+    city: Optional[ProvenanceField] = None
+    cad_appraised_value_2025: Optional[ProvenanceField] = None
+    foreclosing_lender: Optional[ProvenanceField] = None
+    substitute_trustee: Optional[ProvenanceField] = None
+    scheduled_sale_time: Optional[ProvenanceField] = None
+    original_principal: Optional[ProvenanceField] = None
+    unpaid_principal_balance: Optional[ProvenanceField] = None
+    all_extracted_balances: Optional[ProvenanceField] = None
+    dcad_cross_ref_needed: Optional[ProvenanceField] = None
+
+    # Operational scratch (plain values, not provenance-managed)
+    dcad_xref_error: str = ""
+    dcad_xref_status: str = ""
+    lien_lookup_error: str = ""
 
     # Encumbrances
     liens: list[LienRecord] = field(default_factory=list)
@@ -307,6 +353,21 @@ class CPR:
         sale = pv_value(self.sale_date) if self.sale_date else ""
         return f"{self.county}|{self.parcel_id}|{self.channel}|{sale}"
 
+    def get(self, name: str, default: Any = None) -> Any:
+        """TD1 typed accessor: provenance-unwrapped value or *default*.
+
+        Reads declared fields (ProvenanceField values are unwrapped) and
+        falls back to *default* for anything unset/unknown — replacing the
+        hasattr walls in consumers (find_deals/synthesis/geojson_export).
+        """
+        if not hasattr(self, name):
+            return default
+        val = getattr(self, name)
+        if val is None:
+            return default
+        return pv_value(val)
+
+
     def to_dict(self) -> dict[str, Any]:
         """Serialize to dict (for JSON export / DB storage)."""
         d = {"lien_lookup_status": self.lien_lookup_status}
@@ -326,6 +387,108 @@ class CPR:
             else:
                 d[k] = v
         return d
+
+    @classmethod
+    def from_dict(cls, raw: dict, path_label: str = "cpr",
+                  include_valuation: bool = False,
+                  default_blast_tier: "BlastTier" = BlastTier.T0,
+                  on_warn=None) -> "CPR":
+        """TD5: single inverse of to_dict() (absorbs the former 82-line
+        4-pass loader buried in src/hitl.py).
+
+        Reconstructs identity, declared/provenance fields, ledger (replayed
+        verbatim), liens (receipted via add_lien, chaining onto restored
+        history) and pipeline state. With include_valuation=True the stored
+        valuation object is rebuilt too; HITL flows pass False because the
+        human run replaces it wholesale.
+        """
+        def _warn(msg: str) -> None:
+            (on_warn or (lambda m: None))(msg)
+
+        if not isinstance(raw, dict):
+            raise ValueError(f"{path_label}: expected a CPR dict at top level, "
+                             f"got {type(raw).__name__}")
+        cpr = cls()
+        declared = {f.name for f in dataclasses.fields(cls)}
+
+        def _pf(d):
+            if d is None:
+                return None
+            return ProvenanceField(value=d.get("value"), source=str(d.get("source") or ""),
+                                   retrieved_at=str(d.get("retrieved_at") or ""),
+                                   confidence=float(d.get("confidence") or 0.0))
+
+        skip = ("valuation", "liens", "ledger", "column", "blast_tier",
+                "lien_lookup_status")
+        for key, val in raw.items():
+            if key in skip:
+                continue
+            if key == "lien_priority_ranking":
+                cpr.lien_priority_ranking = [str(x) for x in (val or [])]
+            elif isinstance(val, dict) and {"value", "source"} <= set(val):
+                setattr(cpr, key, _pf(val))
+            elif key in declared or not isinstance(val, (dict, list)):
+                try:
+                    setattr(cpr, key, val)
+                except (AttributeError, TypeError) as exc:
+                    _warn(f"{path_label}: could not restore field {key!r}: {exc}")
+
+        for entry in raw.get("ledger") or []:
+            if not isinstance(entry, dict):
+                continue
+            e = ProvenanceEntry(
+                field_name=str(entry.get("field_name") or ""),
+                old_value=entry.get("old_value"), new_value=entry.get("new_value"),
+                source=str(entry.get("source") or ""),
+                timestamp=str(entry.get("timestamp") or ""),
+                prev_hash=str(entry.get("prev_hash") or ""),
+                note=str(entry.get("note") or ""))
+            e.entry_hash = str(entry.get("entry_hash") or "")
+            cpr.ledger.append(e)
+
+        for ld in raw.get("liens") or []:
+            if not isinstance(ld, dict):
+                continue
+            cpr.add_lien(LienRecord(
+                lien_type=str(ld.get("lien_type") or "unknown"),
+                amount=(float(ld["amount"]) if ld.get("amount") is not None else None),
+                recording_date=ld.get("recording_date"), lender=ld.get("lender"),
+                priority=int(ld.get("priority") or 0),
+                survives_foreclosure=bool(ld.get("survives_foreclosure")),
+                survives_tax_sale=bool(ld.get("survives_tax_sale"))),
+                source="cpr_rehydrate", confidence=0.0)
+
+        cpr.blast_tier = coerce_blast_tier_like(raw.get("blast_tier"), default_blast_tier)
+        col = raw.get("column")
+        if col is not None:
+            try:
+                cpr.column = CPRColumn(str(col))
+            except ValueError:
+                _warn(f"{path_label}: unrecognized column {col!r}; keeping {cpr.column.value}")
+        status = raw.get("lien_lookup_status")
+        if status is not None:
+            try:
+                cpr.lien_lookup_status = str(status)
+            except ValueError:
+                _warn(f"{path_label}: invalid lien_lookup_status {status!r}")
+        if raw.get("dead_reason"):
+            cpr.dead_reason = str(raw["dead_reason"])
+
+        if include_valuation:
+            vd = raw.get("valuation")
+            if isinstance(vd, dict):
+                comps = [CompRecord(**{k: v for k, v in cd.items()
+                                        if k in CompRecord.__dataclass_fields__})
+                         for cd in (vd.get("comp_set") or []) if isinstance(cd, dict)]
+                cpr.valuation = ValuationObject(
+                    as_is_value=_pf(vd.get("as_is_value")),
+                    arv=_pf(vd.get("arv")),
+                    rent_estimate=_pf(vd.get("rent_estimate")),
+                    comp_set=comps,
+                    comp_source=str(vd.get("comp_source") or ""),
+                    gate_val_verdict=str(vd.get("gate_val_verdict") or ""),
+                    gate_val_reason=str(vd.get("gate_val_reason") or ""))
+        return cpr
 
 
 if __name__ == "__main__":
@@ -356,10 +519,16 @@ if __name__ == "__main__":
     assert cpr.owner_name.value == "John & Jane Doe"  # rejected writes left no trace
     assert len(cpr.ledger) == 2
 
-    # D4-light: undeclared names allowed but receipted with a note (enrichers rely on this)
+    # D4-light: undeclared names allowed but receipted with a note (enrichers rely
+    # on this). deed_number is a DECLARED field as of TD1 — use an unknown name.
+    cpr.set_field("some_future_field", "x", "collin_clerk", 0.9)
+    assert cpr.some_future_field.value == "x"
+    assert cpr.ledger[-1].note == "undeclared-field"
+
+    # TD1: declared fields receipt WITHOUT the undeclared note.
     cpr.set_field("deed_number", "20130806001104940", "collin_clerk", 0.9)
     assert cpr.deed_number.value == "20130806001104940"
-    assert cpr.ledger[-1].note == "undeclared-field"
+    assert cpr.ledger[-1].note != "undeclared-field"
 
     # pv_value unwraps provenance fields, passes anything else through
     assert pv_value(cpr.owner_name) == "John & Jane Doe"
@@ -371,7 +540,7 @@ if __name__ == "__main__":
                             survives_foreclosure=False, survives_tax_sale=False),
                  "collin_clerk", confidence=0.9)
     assert len(cpr.liens) == 1
-    assert len(cpr.ledger) == 4
+    assert len(cpr.ledger) == 5  # 2 owner writes + undeclared + declared + lien receipt
     lien_receipt = cpr.ledger[-1]
     assert lien_receipt.field_name == "lien:mortgage"
     assert lien_receipt.new_value == {"amount": 350_000, "lien_type": "mortgage",
@@ -382,7 +551,7 @@ if __name__ == "__main__":
         raise AssertionError("expected ValueError for add_lien confidence=2.0")
     except ValueError:
         pass
-    assert len(cpr.liens) == 1 and len(cpr.ledger) == 4
+    assert len(cpr.liens) == 1 and len(cpr.ledger) == 5
 
     # Managed attribute lien_lookup_status: default + validated values (S7)
     assert cpr.lien_lookup_status == "not_run"
@@ -397,7 +566,7 @@ if __name__ == "__main__":
     # Column move (receipted)
     cpr.move_column(CPRColumn.ENRICHED)
     assert cpr.column == CPRColumn.ENRICHED
-    assert len(cpr.ledger) == 5
+    assert len(cpr.ledger) == 6  # + column-move receipt
 
     # Dedupe key
     cpr.channel = "foreclosure_notice"

@@ -220,7 +220,7 @@ def cross_reference_dcad_bulk(cprs: list, batch_limit: int = 50) -> int:
             continue
         # Check if CPR needs DCAD cross-ref
         needs_ref = False
-        if hasattr(cpr, "dcad_cross_ref_needed") and cpr.dcad_cross_ref_needed:
+        if bool(cpr.get("dcad_cross_ref_needed")):
             needs_ref = cpr.dcad_cross_ref_needed.value
         elif cpr.improvement_sqft is None or (cpr.improvement_sqft and not cpr.improvement_sqft.value):
             needs_ref = True

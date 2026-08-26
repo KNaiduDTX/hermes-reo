@@ -142,7 +142,7 @@ of human memory.
   `HERMES_TEST_ADDRESS`; they pass through to the job, which falls back to the
   same defaults as `test_live_portals.py` when unset.
 - **Local equivalent:** `make test-live`. Note it names the module explicitly
-  (`pytest test_live_portals.py -m live`): `pytest.ini` sets `testpaths = tests`
+  (`pytest test_live_portals.py -m live`): pyproject.toml [tool.pytest.ini_options] sets testpaths=tests
   while the live tier lives at repo root, so bare `pytest -m live` collects
   nothing and exits 5. The same explicit invocation is used in CI.
 - **On red:** a failed `weekly-live` run means an adapter or portal surface
