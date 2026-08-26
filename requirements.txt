@@ -9,6 +9,7 @@ pillow==11.3.0
 pypdf==6.16.1
 fastapi==0.128.8
 uvicorn==0.39.0
+jinja2==3.1.6
 
 # dev/test
 ruff==0.16.4
