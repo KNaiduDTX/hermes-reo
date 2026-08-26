@@ -197,15 +197,86 @@ def load_cpr_any(parcel_id: str) -> Optional[dict]:
 
 @app.get("/deals/{parcel_id}", response_class=HTMLResponse)
 def dossier(request: Request, parcel_id: str):
+    """Full abstract from a saved CPR, or a register-level abstract
+    synthesized from the live dataset row when no CPR exists yet."""
     cpr = load_cpr_any(parcel_id)
-    if cpr is None:
+    flat = next((d for d in deals()
+                 if str(d.get("parcel_id")) == str(parcel_id)
+                 or d.get("property_id") == parcel_id
+                 or d.get("notice_id") == parcel_id), None)
+    if cpr is None and flat is None:
         raise HTTPException(status_code=404, detail="parcel not found")
 
     def pv(name, default=None):
-        v = cpr.get(name)
+        v = cpr.get(name) if cpr else None
         if isinstance(v, dict):
             return v.get("value", default)
         return v if v is not None else default
+
+    def fv(name, default=None):
+        if flat is None:
+            return default
+        v = flat.get(name)
+        return v if v not in (None, "", "Unknown", 0) else default
+
+    base_ctx = {
+        "request": request,
+        "active": "dossier",
+        "breadcrumb": f"Desk · Dossier · {parcel_id}",
+        "parcel_id": parcel_id,
+        "notice_id": fv("notice_id"),
+        "property_id": fv("property_id"),
+    }
+
+    # ------------------------- REGISTER-LEVEL PATH -------------------------
+    if cpr is None:
+        cad_f = money(fv("cad_value"))
+        debt_f = money(fv("mortgage_debt"))
+        est_mao = max(0.0, cad_f * 0.70)
+        ctx = {**base_ctx,
+               "data_level": "register",
+               "badges": {"stage": "Registered",
+                          "tier": str(fv("blast_tier") or "T0"),
+                          "deal_type": "—", "recommendation": "Enrich"},
+               "gates": [
+                   {"name": "GATE-VAL", "state": "Pending"},
+                   {"name": "GATE-LEGAL-LIEN",
+                    "state": str(fv("lien_gate") or "not run").title()},
+                   {"name": "AGENT-REV", "state": "Not run"}],
+               "synthesis": ("Register-level abstract — comp pull (HITL) and "
+                             "DCAD/clerk enrichment pending before underwriting."),
+               "figures": {
+                   "arv": "—",
+                   "arv_chip": "pending comp pull (HITL)",
+                   "as_is": f"${cad_f:,.0f}" if cad_f else "—",
+                   "as_is_chip": "county CAD · register",
+                   "mao": f"${est_mao:,.0f}" if est_mao else "—",
+                   "mao_chip": "est. 70% rule",
+                   "equity": (f"${cad_f - debt_f:,.0f}"
+                              if cad_f and debt_f else "—"),
+                   "net_profit": "—", "roi": "—"},
+               "abstract": [
+                   ("Owner", title_case(str(fv("owner") or "—"))),
+                   ("County", str(fv("county") or "—").title()),
+                   ("City", title_case(str(fv("city") or "—"))),
+                   ("CAD value", f"${cad_f:,.0f}" if cad_f else "—"),
+                   ("Mortgage debt",
+                    f"${debt_f:,.0f}" if debt_f else "—"),
+                   ("Lender", title_case(str(fv("lender") or "—"))),
+                   ("Trustee", title_case(str(fv("trustee") or "—"))),
+                   ("Sale date", str(fv("sale_date") or "—")),
+                   ("Blast tier", str(fv("blast_tier") or "T0")),
+                   ("Lien gate", str(fv("lien_gate") or "not run")),
+                   ("VAL gate", str(fv("val_gate") or "not run"))],
+               "liens": [], "comps": [], "ledger": [], "waterfall": [],
+               "net_profit": None, "ladder": {},
+               "risks": [{"t": "Full abstract pending: comp pull (HITL) + "
+                                "DCAD/clerk enrichment", "sev": "medium"}]}
+        return templates.TemplateResponse("dossier.html", ctx)
+
+    # --------------------------- FULL CPR PATH -----------------------------
+    def pv2(name, default=None):
+        return pv(name, default)
 
     valuation = cpr.get("valuation") or {}
     arv = (valuation.get("arv") or {}).get("value")
@@ -219,7 +290,7 @@ def dossier(request: Request, parcel_id: str):
     from src.underwriting import flip_pnl
 
     rehab = 50_000
-    arv_val = float(arv or 0) or 750_000
+    arv_val = float(arv or 0) or money(pv("cad_appraised_value")) or 750_000
     mao = max(0.0, arv_val * MAO_FACTOR_DEFAULT - rehab)
     ceiling = compute_bid_ceiling(arv=arv_val, rehab=rehab,
                                   factor=MAO_FACTOR_DEFAULT, mao_val=mao)
@@ -231,65 +302,72 @@ def dossier(request: Request, parcel_id: str):
 
     surviving = [l for l in liens if l.get("survives_foreclosure")]
     lien_state = "HITL" if surviving else "Pass"
-    ctx = {
-        "request": request,
-        "active": "dossier",
-        "breadcrumb": f"Desk · Dossier · {parcel_id}",
-        "parcel_id": parcel_id,
-        "badges": {
-            "stage": "Priced", "tier": "T3",
-            "deal_type": str(pv("deal_type") or "DT-Auction"),
-            "recommendation": "Proceed" if not surviving else "Conditional",
-        },
-        "gates": [
-            {"name": "GATE-VAL", "state": str(valuation.get("gate_val_verdict") or "not run").title()},
-            {"name": "GATE-LEGAL-LIEN", "state": lien_state},
-            {"name": "AGENT-REV", "state": "Not run"},
-        ],
-        "synthesis": (
-            "A property-tax lien survives foreclosure — confirm payoff before bidding."
-            if surviving else "Gates clear; pricing within bounds."),
-        "figures": {
-            "arv": f"${arv_val:,.0f}",
-            "arv_chip": _arv_chip(valuation),
-            "as_is": f"${money(pv('cad_appraised_value')):,.0f}",
-            "as_is_chip": "county CAD · 2026",
-            "mao": f"${mao:,.0f}", "mao_chip": f"bid ceiling · ${ceiling:,.0f}",
-            "equity": f"${max(0,(money(pv('cad_appraised_value'))-money(pv('mortgage_debt')))):,.0f}",
-            "net_profit": f"${uw.net_profit:,.0f}", "roi": f"{uw.roi:.1%}",
-        },
-        "abstract": [
-            ("Owner", title_case(str(pv("owner_name") or "—"))),
-            ("Type", str(pv("property_type") or "—").replace("Residential ", "")),
-            ("Building", f"{pv('improvement_sqft') or '—'} sqft"),
-            ("Beds/Baths", f"{pv('beds') or '—'} · {pv('baths') or '—'}"),
-            ("Built", str(pv("year_built") or "—")),
-            ("Homestead", "Yes" if pv("homestead") else "No"),
-            ("ISD", str(pv("isd") or "—")),
-            ("Mortgage debt", f"${money(pv('mortgage_debt')):,.0f}" if pv("mortgage_debt") else "—"),
-            ("Lender", title_case(str(pv("foreclosing_lender") or "—"))),
-            ("Trustee", title_case(str(pv("substitute_trustee") or "—"))),
-            ("Sale date", str(pv("sale_date") or "—")),
-        ],
-        "liens": liens, "comps": comps[:6],
-        "waterfall": [
-            ("ARV", arv_val), ("Purchase", -mao), ("Rehab + contingency", -(rehab * 1.2)),
-            ("Holding", -5_000), ("Financing", -10_000),
-            ("Closing", -(arv_val * CLOSING_SELL_PCT)),
-        ],
-        "net_profit": uw.net_profit,
-        "ladder": ladder, "ledger": ledger,
-        "risks": [
-            {"t": "Surviving tax lien", "sev": "high"} for _ in surviving
-        ] + [{"t": "Auction timing risk", "sev": "medium"},
-             {"t": "Comp recency", "sev": "low"}],
-    }
+    arv_chip = _arv_chip(valuation)
+
+    ctx = {**base_ctx,
+           "data_level": "full",
+           "badges": {"stage": "Priced", "tier": "T3",
+                      "deal_type": str(pv("deal_type") or "DT-Auction"),
+                      "recommendation": "Conditional" if surviving else "Proceed"},
+           "gates": [
+               {"name": "GATE-VAL",
+                "state": str(valuation.get("gate_val_verdict") or "not run").title()},
+               {"name": "GATE-LEGAL-LIEN", "state": lien_state},
+               {"name": "AGENT-REV", "state": "Not run"}],
+           "synthesis": (
+               "A property-tax lien survives foreclosure — confirm payoff "
+               "before bidding." if surviving else
+               "Gates clear; pricing within bounds."),
+           "figures": {
+               "arv": f"${arv_val:,.0f}", "arv_chip": arv_chip,
+               "as_is": f"${money(pv('cad_appraised_value')):,.0f}",
+               "as_is_chip": "county CAD · 2026",
+               "mao": f"${mao:,.0f}",
+               "mao_chip": f"bid ceiling · ${ceiling:,.0f}",
+               "equity": f"${max(0, (money(pv('cad_appraised_value')) - money(pv('mortgage_debt')))):,.0f}",
+               "net_profit": f"${uw.net_profit:,.0f}", "roi": f"{uw.roi:.1%}"},
+           "abstract": [
+               ("Owner", title_case(str(pv("owner_name") or "—"))),
+               ("Type", str(pv("property_type") or "—").replace("Residential ", "")),
+               ("Building", f"{pv('improvement_sqft') or '—'} sqft"),
+               ("Beds/Baths", f"{pv('beds') or '—'} · {pv('baths') or '—'}"),
+               ("Built", str(pv("year_built") or "—")),
+               ("Homestead", "Yes" if pv("homestead") else "No"),
+               ("ISD", str(pv("isd") or "—")),
+               ("Mortgage debt", f"${money(pv('mortgage_debt')):,.0f}" if pv("mortgage_debt") else "—"),
+               ("Lender", title_case(str(pv("foreclosing_lender") or "—"))),
+               ("Trustee", title_case(str(pv("substitute_trustee") or "—"))),
+               ("Sale date", str(pv("sale_date") or "—")),
+               ("Price/sqft", f"${money(pv('price_per_sqft')):,.2f}" if pv("price_per_sqft") else "—"),
+               ("CAD YoY", f"{pv('val_change_pct')}%" if pv("val_change_pct") is not None else "—")],
+           "liens": liens, "comps": comps[:6],
+           "waterfall": [
+               ("ARV", arv_val), ("Purchase", -mao),
+               ("Rehab + contingency", -(rehab * 1.2)),
+               ("Holding", -5_000), ("Financing", -10_000),
+               ("Closing", -(arv_val * CLOSING_SELL_PCT))],
+           "net_profit": uw.net_profit,
+           "sensitivity_range": _sensitivity_range(arv_val, rehab, mao,
+                                                   arv_val * CLOSING_SELL_PCT),
+           "ladder": ladder, "ledger": ledger,
+           "risks": ([{"t": "Surviving tax lien", "sev": "high"} for _ in surviving]
+                     + [{"t": "Auction timing risk", "sev": "medium"},
+                        {"t": "Comp recency", "sev": "low"}])}
     return templates.TemplateResponse("dossier.html", ctx)
 
 
-# --------------------------------------------------------------------------- #
-# IV · Map
-# --------------------------------------------------------------------------- #
+def _sensitivity_range(arv, rehab, purchase, closing_sell):
+    lows, highs = [], []
+    for af in (0.9, 1.1):
+        for rf in (0.8, 1.2):
+            a, r = arv * af, rehab * rf
+            net = a - purchase - r * 1.2 - 15_000 - closing_sell * af
+            lows.append(net); highs.append(net)
+    lo, hi = min(lows), max(highs)
+    margin = (hi - purchase - rehab * 1.2) / hi * 100 if hi else 0
+    return f"${lo/1e3:,.0f}k – ${hi/1e3:,.0f}k", f"{margin:.1f}%"
+
+
 @app.get("/map", response_class=HTMLResponse)
 def map_page(request: Request):
     geo = _read(DATA / "live_foreclosures.geojson") or {"features": []}

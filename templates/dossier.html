@@ -193,7 +193,19 @@
   {% set chip_parts = (figures.arv_chip or '').split(' · ') %}
   {% set val_src = chip_parts[0] if chip_parts | length > 0 else '—' %}
   {% set val_conf = (chip_parts[1] if chip_parts | length > 1 else '') | replace('conf ', '') %}
-  <div class="verdict">
+  {% if data_level == 'register' %}
+<div class="card" style="border-left:3px solid var(--color-accent); padding: var(--space-3) var(--space-4); margin-bottom: var(--space-4);">
+  <div class="kicker" style="margin-bottom:4px;">REGISTER-LEVEL ABSTRACT</div>
+  <div style="font-size:14px; color:var(--color-neutral-700);">
+    This asset is in the working register but has no full abstract yet.
+    Run a comp pull (HITL) plus DCAD/clerk enrichment to unlock valuation,
+    encumbrance stack, and provenance ledger.
+    {% if property_id %}Identity: <code>{{ property_id }}</code>{% endif %}
+    {% if notice_id %} · notice <code>{{ notice_id }}</code>{% endif %}
+  </div>
+</div>
+{% endif %}
+<div class="verdict">
     <div class="verdict-gates">
       {% for g in gates %}
         {% set st = (g.state or '') | lower %}
@@ -297,6 +309,37 @@
       <p class="empty-note">No comparables recorded yet &mdash; GATE-VAL needs an MLS/appraiser comp pull.</p>
       {% endif %}
 
+      {% if data_level == "full" %}
+      <!-- underwrite · fix-and-flip -->
+      <div class="sec-head">
+        <h4>Underwrite &middot; fix-and-flip</h4><span class="sec-rule"></span>
+        <a class="sec-link" href="/underwriting">Open in Underwriting &rarr;</a>
+      </div>
+      {% if comps %}
+      <div class="scroll-x">
+        <table class="table num comp-table">
+          <thead>
+            <tr>
+              <th>Comparable</th>
+              <th class="ta-r" style="width:120px">Sale price</th>
+              <th class="ta-r" style="width:110px">Adjusted</th>
+            </tr>
+          </thead>
+          <tbody>
+            {% for c in comps %}
+            <tr>
+              <td>{{ ((c.address or '').split(',')[0]) | title }}</td>
+              <td class="ta-r">{% if c.sale_price is not none %}${{ "{:,.0f}".format(c.sale_price) }}{% else %}<span class="dash">&mdash;</span>{% endif %}</td>
+              <td class="ta-r">{% if c.adjusted_price is not none %}${{ "{:,.0f}".format(c.adjusted_price) }}{% else %}<span class="dash">&mdash;</span>{% endif %}</td>
+            </tr>
+            {% endfor %}
+          </tbody>
+        </table>
+      </div>
+      {% else %}
+      <p class="empty-note">No comparables recorded yet &mdash; GATE-VAL needs an MLS/appraiser comp pull.</p>
+      {% endif %}
+
       <!-- underwrite · fix-and-flip -->
       <div class="sec-head">
         <h4>Underwrite &middot; fix-and-flip</h4><span class="sec-rule"></span>
@@ -339,6 +382,7 @@
       </div>
 
     </div>
+      {% endif %}
 
     <!-- RIGHT rail -->
     <div class="col-rail">
@@ -381,23 +425,23 @@
         <div class="ladder-row num">
           <div class="rung">
             <div class="rung-k">Opening</div>
-            <div class="rung-v">${{ "{:,.0f}".format(ladder.opening) }}</div>
+            <div class="rung-v">${{ "{:,.0f}".format(ladder.get("opening", 0)) }}</div>
           </div>
           <span class="rung-sep">&rsaquo;</span>
           <div class="rung">
             <div class="rung-k rung-k--target">Target</div>
-            <div class="rung-v rung-v--target">${{ "{:,.0f}".format(ladder.target) }}</div>
+            <div class="rung-v rung-v--target">${{ "{:,.0f}".format(ladder.get("target", 0)) }}</div>
           </div>
           <span class="rung-sep">&rsaquo;</span>
           <div class="rung">
             <div class="rung-k">Walk-away</div>
-            <div class="rung-v">${{ "{:,.0f}".format(ladder.walk_away) }}</div>
+            <div class="rung-v">${{ "{:,.0f}".format(ladder.get("walk_away", 0)) }}</div>
           </div>
         </div>
         <hr class="hr hr-tight">
         <div class="num">
-          <div class="term-row"><span class="term-k">Earnest</span><span>${{ "{:,.0f}".format(ladder.opening * 0.01) }}</span></div>
-          <div class="term-row"><span class="term-k">Option fee &middot; 7-day</span><span>${{ "{:,.0f}".format(ladder.opening * 0.001) }}</span></div>
+          <div class="term-row"><span class="term-k">Earnest</span><span>${{ "{:,.0f}".format(ladder.get('opening', 0) * 0.01) }}</span></div>
+          <div class="term-row"><span class="term-k">Option fee &middot; 7-day</span><span>${{ "{:,.0f}".format(ladder.get('opening', 0) * 0.001) }}</span></div>
           <div class="term-row"><span class="term-k">Closing</span><span>7 days &middot; cash</span></div>
         </div>
         <p class="key-msg">&ldquo;The auction is days away. Cash now is better than hoping the property doesn&rsquo;t sell for less than you owe.&rdquo;</p>
