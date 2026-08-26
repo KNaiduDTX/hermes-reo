@@ -170,6 +170,27 @@
   }
   footer{position:fixed;bottom:0;left:0;right:0;padding:6px 20px;background:var(--bg2);
     border-top:1px solid var(--border);color:var(--faint);font-size:11px;display:flex;gap:16px;z-index:1200}
+
+  /* ---------- deal detail (F3) ---------- */
+  table.deals tbody tr.clickable{cursor:pointer}
+  .action-bar{display:flex;gap:10px;align-items:center;flex-wrap:wrap;margin-bottom:12px}
+  .action-bar input[type=search]{min-width:240px}
+  .note-line{color:var(--faint);font-size:11.5px}
+  .kv td:first-child{color:var(--muted);width:150px;text-transform:uppercase;font-size:10.5px;letter-spacing:.05em;padding-top:6px}
+  .kv td{vertical-align:top}
+  .gate-chips{display:flex;gap:8px;flex-wrap:wrap;margin-bottom:8px}
+  pre.offer-letter{
+    background:var(--bg2);border:1px solid var(--border2);border-radius:8px;
+    padding:14px 16px;font-family:var(--mono);font-size:12px;line-height:1.55;
+    white-space:pre-wrap;color:var(--text);max-height:420px;overflow:auto;
+  }
+  .terms-strip{display:flex;gap:14px;flex-wrap:wrap;margin:6px 0 12px}
+  .term-chip{background:var(--panel2);border:1px solid var(--border2);border-radius:8px;
+    padding:7px 12px;font-size:12px;color:var(--muted)}
+  .term-chip b{display:block;color:var(--accent);font-size:15px;font-family:var(--mono)}
+  .dead-note{border:1px solid #6d5426;background:rgba(224,168,62,.08);color:#e8c98a;
+    border-radius:8px;padding:10px 14px;margin-bottom:12px;font-size:13px}
+
 </style>
 </head>
 <body>
@@ -180,7 +201,9 @@
   <nav>
     <button data-view="overview" class="active">Overview</button>
     <button data-view="deals">Deals</button>
+    <button data-view="detail">Detail</button>
     <button data-view="map">Map</button>
+    <button data-view="market">Market</button>
     <button data-view="stats">Stats</button>
   </nav>
 </header>
@@ -268,6 +291,96 @@
     </div>
   </section>
 
+  <!-- ============ DEAL DETAIL (F3) ============ -->
+  <section class="view" id="view-detail">
+    <div class="view-head">
+      <h1>Deal Detail</h1><span class="sub" id="detailSub">click a row in the Deals table to drill in</span>
+      <span class="spacer"></span>
+      <button class="btn" id="detailBack">← Back to deals</button>
+    </div>
+    <div class="error-banner" id="detailError"></div>
+
+    <div id="detailPlaceholder" class="empty-msg" style="padding:70px 30px">
+      No deal selected — open the <b>Deals</b> view and click any row to load its
+      CPR snapshot, liens, provenance ledger, and deal memo.
+    </div>
+
+    <div id="detailBody" style="display:none">
+      <div class="action-bar card">
+        <button class="btn primary" id="offerBtn">✎ Generate draft offer</button>
+        <input type="search" id="clerkParty" placeholder="Party name for clerk search">
+        <button class="btn" id="clerkBtn">⚖ Search Collin clerk</button>
+        <span class="note-line">clerk search is LIVE (~10–15 s, one polite request)</span>
+      </div>
+
+      <div class="grid-2">
+        <div class="card"><h2 class="panel-title">Property Snapshot</h2>
+          <table class="mini kv" id="snapshotTable"></table></div>
+        <div class="card"><h2 class="panel-title">Ownership · Tax · Distress</h2>
+          <table class="mini kv" id="ownerTable"></table></div>
+      </div>
+
+      <div class="grid-2" style="margin-top:12px">
+        <div class="card"><h2 class="panel-title">Valuation & Gates</h2><div id="valuationBox"></div></div>
+        <div class="card"><h2 class="panel-title">Encumbrance Stack</h2>
+          <table class="mini" id="lienTable"></table></div>
+      </div>
+
+      <div class="card" style="margin-top:12px">
+        <h2 class="panel-title">Provenance Ledger <span id="ledgerMeta" style="text-transform:none;letter-spacing:0;color:var(--faint)"></span></h2>
+        <table class="mini" id="ledgerTable"></table>
+      </div>
+
+      <div class="card" id="offerResultCard" style="display:none;margin-top:12px">
+        <h2 class="panel-title">Draft Offer <span style="text-transform:none;letter-spacing:0;color:var(--faint)">staged under data/drafts/ — human review required</span></h2>
+        <div id="offerDeadNote" class="dead-note" style="display:none"></div>
+        <div id="offerTerms" class="terms-strip"></div>
+        <pre class="offer-letter" id="offerLetter" style="display:none"></pre>
+      </div>
+
+      <div class="card" id="clerkResultCard" style="display:none;margin-top:12px">
+        <h2 class="panel-title">Collin Clerk Results</h2>
+        <div id="clerkSummary" style="margin-bottom:8px"></div>
+        <table class="mini" id="clerkPreview"></table>
+        <div class="note-line" id="clerkPoliteness" style="margin-top:6px"></div>
+      </div>
+
+      <div class="card" style="margin-top:12px;margin-bottom:40px">
+        <h2 class="panel-title">Deal Memo</h2>
+        <div class="stats-body" style="border:none;background:none;padding:0" id="memoBody">
+          <p class="dim">loading…</p></div>
+      </div>
+    </div>
+  </section>
+
+  <!-- ============ MARKET (F11) ============ -->
+  <section class="view" id="view-market">
+    <div class="view-head">
+      <h1>Market Aggregates</h1>
+      <span class="sub">current_deals.json grouped — medians and equity are computed from recorded fields only</span>
+      <span class="spacer"></span>
+      <label style="color:var(--faint);font-size:11.5px;text-transform:uppercase">Group by</label>
+      <select id="mktGroupby">
+        <option value="zip">ZIP</option>
+        <option value="city">City</option>
+        <option value="isd">ISD</option>
+        <option value="county">County</option>
+      </select>
+      <button class="btn" id="mktRefresh">↻ Refresh</button>
+    </div>
+    <div class="error-banner" id="mktError"></div>
+    <div class="table-wrap" style="max-height:calc(100vh - 230px)">
+      <table class="deals">
+        <thead><tr>
+          <th>Group</th><th class="num">Deals</th><th class="num">Median CAD</th>
+          <th class="num">Total Debt</th><th class="num">Positive Equity</th>
+          <th class="num">Upcoming Sales</th>
+        </tr></thead>
+        <tbody id="marketBody"><tr><td colspan="6" class="empty-msg">loading…</td></tr></tbody>
+      </table>
+    </div>
+  </section>
+
   <!-- ============ STATS ============ -->
   <section class="view" id="view-stats">
     <div class="view-head"><h1>Portfolio Statistics</h1>
@@ -281,8 +394,8 @@
 </main>
 
 <footer>
-  <span>read-only · local pipeline data</span>
-  <span>/api/deals · /api/geojson · /api/stats · /api/summary</span>
+  <span>local pipeline data · actions are draft-only</span>
+  <span>/api/deals · /api/cpr · /api/memo · /api/market · /api/stats · /api/summary</span>
   <span class="spacer"></span>
   <span id="footStamp"></span>
 </footer>
@@ -348,17 +461,22 @@ const state = {
   sort:{ key:'address', dir:1 },
   page:0, pageSize:50,
   map:{ inited:false, map:null, layer:null, features:[], county:'', tier:'' },
+  detail:{ parcel:null, memoLoaded:false },
+  market:{ loaded:false, groupby:'zip' },
 };
 
 /* ---------------- tabs ---------------- */
+function switchView(name){
+  document.querySelectorAll('nav button').forEach(b=>
+    b.classList.toggle('active', b.dataset.view===name));
+  document.querySelectorAll('section.view').forEach(s=>s.classList.remove('active'));
+  const sec = $('view-'+name);
+  if (sec) sec.classList.add('active');
+  if (name==='map') initMap();
+  if (name==='market') loadMarket();
+}
 document.querySelectorAll('nav button').forEach(btn=>{
-  btn.addEventListener('click', ()=>{
-    document.querySelectorAll('nav button').forEach(b=>b.classList.remove('active'));
-    document.querySelectorAll('section.view').forEach(s=>s.classList.remove('active'));
-    btn.classList.add('active');
-    $('view-'+btn.dataset.view).classList.add('active');
-    if (btn.dataset.view==='map') initMap();
-  });
+  btn.addEventListener('click', ()=>switchView(btn.dataset.view));
 });
 
 /* ================= OVERVIEW ================= */
@@ -535,8 +653,12 @@ function renderTable(){
   const slice = rows.slice(start, start+state.pageSize);
 
   $('dealsBody').innerHTML = slice.length
-    ? slice.map(d=>'<tr>'+COLUMNS.map(c=>cellHTML(c,d)).join('')+'</tr>').join('')
+    ? slice.map(d=>'<tr class="clickable" data-parcel="'+esc(d.parcel_id||'')+
+                   '" title="Click for deal detail">'+COLUMNS.map(c=>cellHTML(c,d)).join('')+'</tr>').join('')
     : '<tr><td colspan="'+COLUMNS.length+'" class="empty-msg">No deals match the current filters.</td></tr>';
+  $('dealsBody').querySelectorAll('tr.clickable').forEach(tr=>{
+    tr.addEventListener('click', ()=>openDetail(tr.dataset.parcel));
+  });
 
   $('pgLabel').textContent = `page ${state.page+1} / ${pages}`;
   $('matchLabel').textContent =
@@ -668,6 +790,264 @@ function rebuildMarkers(){
     `live_foreclosures.geojson · ${shown} / ${state.map.features.length} features plotted`;
 }
 
+/* ================= DEAL DETAIL (F3/F4) ================= */
+/* Provenance-wrapped fields arrive as {value, source, retrieved_at, confidence}. */
+function pvWrap(v){
+  return v && typeof v==='object' && !Array.isArray(v) && ('value' in v) ? v : null;
+}
+function pvVal(v){ const p=pvWrap(v); return p ? p.value : v; }
+
+function kvRow(label, raw, fmt){
+  const p = pvWrap(raw);
+  let val = p ? p.value : raw;
+  if (val==null || val==='') return '';
+  if (fmt) val = fmt(val);
+  const conf = p ? '<td class="n">'+Math.round((p.confidence||0)*100)+'%</td>' : '<td class="n">—</td>';
+  return '<tr><td>'+esc(label)+'</td><td>'+esc(String(val))+'</td>'+conf+'</tr>';
+}
+
+function kvTable(elId, pairs){
+  const html = pairs.map(pr=>kvRow(pr[0], pr[1], pr[2])).join('');
+  $(elId).innerHTML = html || '<tr><td colspan="3" class="empty-msg">no data recorded</td></tr>';
+}
+
+function gateChip(label, value, cls){
+  return '<span class="gchip '+(cls||'')+'">'+esc(label)+' <b>'+esc(value||'—')+'</b></span>';
+}
+
+function renderDetail(cpr){
+  $('detailPlaceholder').style.display='none';
+  $('detailBody').style.display='block';
+  $('detailSub').textContent =
+    (cpr.situs_address||'(no address)')+' · '+esc(cpr.county||'?')+' · '+(cpr.channel||'no channel');
+
+  kvTable('snapshotTable', [
+    ['Address',   cpr.situs_address],
+    ['Legal',     cpr.legal_description],
+    ['Type',      cpr.property_type],
+    ['SqFt',      cpr.improvement_sqft],
+    ['Land SqFt', cpr.land_sqft],
+    ['Beds',      cpr.beds],
+    ['Baths',     cpr.baths],
+    ['Stories',   cpr.stories],
+    ['Year built',cpr.year_built],
+    ['Pool',      pvVal(cpr.pool)==null?null:cpr.pool],
+    ['Homestead', pvVal(cpr.homestead)==null?null:cpr.homestead],
+    ['ISD',       cpr.isd],
+  ]);
+
+  kvTable('ownerTable', [
+    ['Owner',        cpr.owner_name],
+    ['Mailing addr', cpr.owner_mailing_address],
+    ['Own yrs',      cpr.ownership_length_years],
+    ['Absentee',     cpr.absentee],
+    ['Estate',       cpr.deceased_estate],
+    ['Tax delinquent', cpr.tax_delinquent],
+    ['Delinq amount',  cpr.tax_delinquent_amount, fmtMoney],
+    ['Tax suit case',  cpr.tax_suit_case_number],
+    ['Channel',      cpr.channel],
+    ['Deal type',    cpr.deal_type],
+    ['NOD status',   cpr.nod_status],
+    ['Sale date',    cpr.sale_date],
+    ['Opening bid',  cpr.opening_bid, fmtMoney],
+    ['Redemption',   cpr.redemption_class],
+    ['Redemption exp.', cpr.redemption_expiry],
+  ]);
+
+  /* Valuation & gates */
+  const cadP = pvWrap(cpr.cad_appraised_value);
+  const val = cpr.valuation || {};
+  const arvP = pvWrap(val.arv);
+  const compSet = Array.isArray(val.comp_set) ? val.comp_set : [];
+  $('valuationBox').innerHTML =
+    '<div class="gate-chips">'+
+      gateChip('COLUMN', cpr.column, 'pass')+
+      gateChip('TIER', String(cpr.blast_tier==null?'—':cpr.blast_tier), 'warn')+
+      gateChip('LIEN LOOKUP', cpr.lien_lookup_status,
+               cpr.lien_lookup_status==='ok'?'pass':(cpr.lien_lookup_status==='error'?'fail':''))+
+      gateChip('GATE-VAL', val.gate_val_verdict||'none',
+               val.gate_val_verdict==='pass'?'pass':(val.gate_val_verdict?'fail':''))+
+      (cpr.dead_reason?gateChip('DEAD', cpr.dead_reason, 'fail'):'')+
+    '</div>'+
+    '<table class="mini kv">'+
+      '<tr><td>CAD appraised</td><td>'+(cadP?fmtMoney(num(cadP.value)):'—')+'</td>'+
+        '<td class="n">'+(cadP?Math.round((cadP.confidence||0)*100)+'%':'—')+'</td></tr>'+
+      '<tr><td>ARV (HITL)</td><td>'+(arvP?fmtMoney(num(arvP.value)):'—')+'</td>'+
+        '<td class="n">'+(arvP?Math.round((arvP.confidence||0)*100)+'%':'—')+'</td></tr>'+
+      '<tr><td>Comp source</td><td colspan="2">'+esc(String(val.comp_source||'—'))+
+        ' · '+compSet.length+' comps</td></tr>'+
+      (val.gate_val_reason?'<tr><td>GATE-VAL reason</td><td colspan="2" class="dim">'+esc(String(val.gate_val_reason))+'</td></tr>':'')+
+    '</table>';
+
+  /* Liens */
+  const liens = Array.isArray(cpr.liens) ? cpr.liens : [];
+  $('lienTable').innerHTML =
+    '<tr><th>Type</th><th class="n">Amount</th><th>Recorded</th><th>Lender</th>'+
+    '<th class="n">Pri</th><th title="Survives foreclosure">FC</th><th title="Survives tax sale">TS</th></tr>'+
+    (liens.length ? liens.map(l=>
+      '<tr><td>'+esc(l.lien_type||'—')+'</td>'+
+      '<td class="n">'+(num(l.amount)!=null?fmtMoney(num(l.amount)):((l.amount!=null)?String(l.amount):'—'))+'</td>'+
+      '<td class="dim">'+esc(l.recording_date||'—')+'</td>'+
+      '<td class="dim" title="'+esc(l.lender||'')+'">'+esc(l.lender||'—')+'</td>'+
+      '<td class="n">'+(l.priority!=null?l.priority:'—')+'</td>'+
+      '<td>'+(l.survives_foreclosure?'<span class="badge fail">yes</span>':'<span class="badge neutral">no</span>')+'</td>'+
+      '<td>'+(l.survives_tax_sale?'<span class="badge fail">yes</span>':'<span class="badge neutral">no</span>')+'</td>'+
+    '</tr>').join('')
+    : '<tr><td colspan="7" class="empty-msg">No liens recorded.</td></tr>');
+
+  /* Provenance ledger */
+  const ledger = Array.isArray(cpr.ledger) ? cpr.ledger : [];
+  const MAX_LEDGER_ROWS = 250;
+  $('ledgerMeta').textContent = ledger.length ? ('· '+ledger.length+' receipts'+
+    (ledger.length>MAX_LEDGER_ROWS?' (showing first '+MAX_LEDGER_ROWS+')':'')) : '';
+  $('ledgerTable').innerHTML =
+    '<tr><th>Field</th><th>Old → New</th><th>Source</th><th>Timestamp</th><th class="n">Note/Hash</th></tr>'+
+    (ledger.length ? ledger.slice(0,MAX_LEDGER_ROWS).map(e=>{
+      const oldV = e.old_value==null?'∅':String(e.old_value).slice(0,60);
+      const newV = e.new_value==null?'∅':String(e.new_value).slice(0,60);
+      return '<tr><td>'+esc(e.field_name||'—')+'</td>'+
+        '<td title="'+esc(oldV+' → '+newV)+'"><span class="dim">'+esc(oldV)+'</span> → '+esc(newV)+'</td>'+
+        '<td class="dim">'+esc(e.source||'—')+'</td>'+
+        '<td class="dim">'+esc(e.timestamp||'—')+'</td>'+
+        '<td class="n dim" title="'+esc(e.entry_hash||'')+'">'+esc(e.note||e.entry_hash||'—')+'</td></tr>';
+    }).join('')
+    : '<tr><td colspan="5" class="empty-msg">Ledger empty.</td></tr>');
+}
+
+async function fetchMemo(parcel){
+  $('memoBody').innerHTML='<p class="dim">loading…</p>';
+  try{
+    const payload = await fetchJSON('/api/memo/'+encodeURIComponent(parcel));
+    $('memoBody').innerHTML = mdToHtml(payload.content||'(empty memo)');
+  }catch(err){
+    $('memoBody').innerHTML = /HTTP 404/.test(err.message)
+      ? '<p class="dim">No deal memo on disk for this parcel yet.</p>'
+      : '<p class="dim">Memo unavailable: '+esc(err.message)+'</p>';
+  }
+}
+
+async function openDetail(parcel){
+  if (!parcel) return;
+  state.detail = { parcel: parcel, memoLoaded: true };
+  switchView('detail');
+  showError('detailError','');
+  $('offerResultCard').style.display='none';
+  $('clerkResultCard').style.display='none';
+  $('detailSub').textContent = 'parcel '+parcel+' — loading CPR snapshot…';
+
+  // Memo is independent of the CPR snapshot — fetch both, degrade separately.
+  fetchMemo(parcel);
+
+  try{
+    const cpr = await fetchJSON('/api/cpr/'+encodeURIComponent(parcel));
+    renderDetail(cpr);
+    const owner = pvVal(cpr.owner_name);
+    if (!$('clerkParty').value && owner) $('clerkParty').value = String(owner);
+  }catch(err){
+    $('detailPlaceholder').style.display='block';
+    $('detailPlaceholder').innerHTML =
+      '<div style="color:var(--amber)">CPR snapshot unavailable for parcel <b>'+esc(parcel)+
+      '</b></div><p class="dim" style="margin-top:8px">'+esc(err.message)+'</p>';
+    $('detailSub').textContent = 'parcel '+parcel+' — no CPR on disk';
+  }
+}
+
+async function runGenerateOffer(){
+  const parcel = state.detail.parcel; if (!parcel) return;
+  const btn = $('offerBtn');
+  btn.disabled = true; btn.textContent = '⏳ Pricing…';
+  showError('detailError','');
+  try{
+    const body = await fetch('/api/generate-offer', {
+      method:'POST', headers:{'Content-Type':'application/json'},
+      body: JSON.stringify({parcel_id: parcel}),
+    }).then(r=>r.json().then(j=>({ok:r.ok, status:r.status, json:j})));
+    if (!body.ok) throw new Error('generate-offer → HTTP '+body.status+': '+(body.json.detail||''));
+    const j = body.json;
+    $('offerResultCard').style.display='block';
+    $('offerDeadNote').style.display = j.dead ? 'block':'none';
+    $('offerDeadNote').textContent = j.note || '';
+    const t = j.terms || {};
+    $('offerTerms').innerHTML = j.dead ? '' : [
+      ['Offer', t.offer_price], ['Earnest', t.earnest_money], ['Option fee', t.option_fee],
+      ['Option', t.option_period_days!=null?t.option_period_days+'d':null],
+      ['Close', t.closing_timeline_days!=null?t.closing_timeline_days+'d':null],
+      ['Financing', t.is_cash?'Cash':'Financed'],
+    ].map(ch=>'<span class="term-chip">'+ch[0]+'<b>'+
+             (typeof ch[1]==='number'?fmtMoney(ch[1]):esc(String(ch[1]==null?'—':ch[1])))+'</b></span>').join('') +
+      (t.blocked ? '<span class="term-chip" style="border-color:#6d3030;color:#f0b9b9">BLOCKED<b>'+esc(t.block_reason||'')+'</b></span>' : '');
+    $('offerLetter').style.display = j.dead ? 'none':'block';
+    $('offerLetter').textContent = j.letter||'';
+  }catch(err){
+    showError('detailError','Could not generate offer draft: '+err.message);
+  }finally{
+    btn.disabled=false; btn.textContent='✎ Generate draft offer';
+  }
+}
+
+async function runClerkSearch(){
+  const party = $('clerkParty').value.trim();
+  if (!party){ showError('detailError','Enter a party name for the clerk search.'); return; }
+  if (!window.confirm('Run LIVE Collin County clerk search for "'+party+'"?\n'+
+                      'One polite request against public records (~10–15 s).')) return;
+  const btn = $('clerkBtn');
+  btn.disabled = true; btn.textContent = '⏳ Searching county records…';
+  showError('detailError','');
+  try{
+    const resp = await fetch('/api/clerk-search', {
+      method:'POST', headers:{'Content-Type':'application/json'},
+      body: JSON.stringify({party_name: party}),
+    });
+    const j = await resp.json();
+    if (!resp.ok) throw new Error('clerk-search → HTTP '+resp.status+': '+(j.detail||''));
+    $('clerkResultCard').style.display='block';
+    $('clerkSummary').innerHTML =
+      '<b>'+esc(j.party_name)+'</b>: <span style="color:var(--accent)">'+j.instrument_count+
+      '</span> instruments · <span style="color:var(--amber)">'+j.encumbrance_count+
+      '</span> encumbrances'+(j.preview_truncated?' · preview shows first '+j.preview.length:'');
+    $('clerkPreview').innerHTML =
+      '<tr><th>Doc #</th><th>Type</th><th>Recorded</th><th>Parties</th><th>Legal</th></tr>'+
+      ((j.preview&&j.preview.length) ? j.preview.map(d=>
+        '<tr><td class="n">'+esc(d.doc_number||'—')+'</td>'+
+        '<td>'+esc(d.doc_type||'—')+'</td>'+
+        '<td class="dim">'+esc(d.recorded_date||'—')+'</td>'+
+        '<td class="dim">'+esc((d.parties||[]).join(' / ')||'—')+'</td>'+
+        '<td class="dim" title="'+esc(d.legal_description||'')+'">'+esc((d.legal_description||'—').slice(0,48))+'</td></tr>'
+      ).join('') : '<tr><td colspan="5" class="empty-msg">No instruments returned.</td></tr>');
+    $('clerkPoliteness').textContent = j.politeness||'';
+  }catch(err){
+    showError('detailError','Clerk search failed: '+err.message);
+  }finally{
+    btn.disabled=false; btn.textContent='⚖ Search Collin clerk';
+  }
+}
+
+/* ================= MARKET (F11) ================= */
+async function loadMarket(){
+  const g = $('mktGroupby').value || state.market.groupby;
+  state.market.groupby = g;
+  showError('mktError','');
+  $('marketBody').innerHTML = '<tr><td colspan="6" class="empty-msg">computing…</td></tr>';
+  try{
+    const payload = await fetchJSON('/api/market?groupby='+encodeURIComponent(g));
+    const rows = payload.groups||[];
+    $('marketBody').innerHTML = rows.length ? rows.map(r=>
+      '<tr><td class="addr" title="'+esc(r.group)+'">'+esc(r.group)+'</td>'+
+      '<td class="num">'+r.deals.toLocaleString()+'</td>'+
+      '<td class="num">'+(r.median_cad!=null?fmtMoney(r.median_cad):'—')+'</td>'+
+      '<td class="num">'+(r.total_debt!=null?fmtMoney(r.total_debt,true):'—')+'</td>'+
+      '<td class="num">'+(r.positive_equity_share!=null?(r.positive_equity_share*100).toFixed(1)+'%':'—')+'</td>'+
+      '<td class="num">'+(r.upcoming_sales||0)+'</td></tr>').join('')
+      : '<tr><td colspan="6" class="empty-msg">No deals to aggregate.</td></tr>';
+    document.querySelector('#view-market .sub').textContent =
+      rows.length+' groups over '+rows.reduce((a,r)=>a+r.deals,0)+' deals · groupby='+payload.groupby;
+    state.market.loaded = true;
+  }catch(err){
+    $('marketBody').innerHTML = '<tr><td colspan="6" class="empty-msg">unavailable</td></tr>';
+    showError('mktError','Market aggregates unavailable: '+err.message);
+  }
+}
+
 /* ================= STATS ================= */
 function mdToHtml(md){
   // Minimal markdown→text renderer: headings, bullets, bold, pipe tables.
@@ -740,6 +1120,13 @@ async function boot(){
 
 $('refreshAllBtn').addEventListener('click', boot);
 $('statsRefresh').addEventListener('click', loadStats);
+
+/* --- detail + market wiring (F3/F4/F11) --- */
+$('detailBack').addEventListener('click', ()=>switchView('deals'));
+$('offerBtn').addEventListener('click', runGenerateOffer);
+$('clerkBtn').addEventListener('click', runClerkSearch);
+$('mktRefresh').addEventListener('click', loadMarket);
+$('mktGroupby').addEventListener('change', loadMarket);
 
 boot();
 </script>
