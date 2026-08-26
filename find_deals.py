@@ -3,6 +3,8 @@
 #
 # Loads the full 335-record lucid-noether dataset, enriches each into a CPR,
 # runs all gates, and outputs deal analysis + portfolio stats + GeoJSON.
+# Set HERMES_SKIP_LIVE=1 to skip the live Collin scrape and run fully offline
+# against the prior dataset (default behavior unchanged: live scrape runs).
 from __future__ import annotations
 import json
 import sys
@@ -11,7 +13,12 @@ from datetime import datetime
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
-from src.enrichment import enrich_from_raw_record, enrich_lead, normalize_deal_identity
+from src.enrichment import (
+    enrich_from_flat_record,
+    enrich_from_raw_record,
+    enrich_lead,
+    normalize_deal_identity,
+)
 from src.adapters.collin_foreclosure import CollinForeclosureAdapter
 from src.adapters.geojson_export import cpr_to_geojson
 from src.underwriting import mao
@@ -155,6 +162,143 @@ def strip_invalid_query_markers(deals: list[dict]) -> list[dict]:
     """
     return [{k: v for k, v in d.items() if k != INVALID_QUERY_KEY}
             for d in deals]
+
+
+# --- HERMES_SKIP_LIVE (offline knob) ------------------------------------------
+# HERMES_SKIP_LIVE=1 skips the live Collin portal scrape and proceeds with the
+# prior dataset alone — enabling offline runs/tests. Default (unset/other) is
+# unchanged: the live scrape runs exactly as before.
+SKIP_LIVE_ENV = "HERMES_SKIP_LIVE"
+_TRUTHY = ("1", "true", "yes", "on")
+
+
+def skip_live_scrape() -> bool:
+    """True when HERMES_SKIP_LIVE requests offline (no live scrape) operation."""
+    return os.environ.get(SKIP_LIVE_ENV, "").strip().lower() in _TRUTHY
+
+
+def fetch_live_cprs(limit=5):
+    """Live Collin scrape unless HERMES_SKIP_LIVE requests offline mode."""
+    if skip_live_scrape():
+        print(f"\n[COLLIN] {SKIP_LIVE_ENV} is set — skipping live scrape; "
+              f"proceeding with prior dataset only")
+        return []
+    return scrape_live_collin(limit=limit)
+
+
+# --- F7 companion: CPR → flat-row coordinate passthrough ----------------------
+# analyze_deal emits no latitude/longitude keys, so a live-scraped lead whose
+# CPR carries geocoded coordinates would lose its position the moment the
+# GeoJSON export reads flat records instead of raw CPRs. copy_cpr_coordinates
+# copies usable CPR coordinates into the row under the same latitude/longitude
+# keys pipeline.py --geocode-backfill writes.
+
+def _coord_float(value):
+    """Unwrap a provenance field/plain value and parse to float, or None."""
+    unwrapped = value.value if hasattr(value, "value") else value
+    try:
+        return float(unwrapped) if unwrapped not in (None, "") else None
+    except (TypeError, ValueError):
+        return None
+
+
+def copy_cpr_coordinates(cpr: CPR, deal: dict) -> bool:
+    """Stamp cpr.gis_lat/gis_lng into *deal* when both are usable (nonzero).
+
+    Returns True when coordinates were copied. Never removes or overwrites
+    with empties — rows keep whatever they already had otherwise.
+    """
+    lat = _coord_float(getattr(cpr, "gis_lat", None))
+    lng = _coord_float(getattr(cpr, "gis_lng", None))
+    if lat and lng and lat != 0 and lng != 0:
+        deal["latitude"] = lat
+        deal["longitude"] = lng
+        return True
+    return False
+
+
+# --- FN4-lite: persisted address-quality columns (ADDITIVE schema) ------------
+# Every saved row gains four derived columns computed from
+# src.addr.normalize_address(address). Existing keys are untouched — the row
+# schema only grows. city_norm carries normalize_address's repairs (e.g.
+# BALCHSPRINGS → "Balch Springs"); invalid_reason explains any addr_valid=False.
+ADDRESS_COLUMN_KEYS = ("zip5", "city_norm", "addr_valid", "invalid_reason")
+
+
+def address_columns(address) -> dict:
+    """The four FN4-lite columns for one raw address string."""
+    norm = normalize_address(str(address or ""))
+    return {
+        "zip5": norm.zip5 or "",
+        "city_norm": norm.city or "",
+        "addr_valid": bool(norm.valid),
+        "invalid_reason": norm.invalid_reason or "",
+    }
+
+
+def stamp_address_columns(deal: dict) -> dict:
+    """Append ADDRESS_COLUMN_KEYS to *deal* (mutates and returns it)."""
+    deal.update(address_columns(deal.get("address")))
+    return deal
+
+
+# --- F7: GeoJSON from flat-record CPRs (coordinate-leak fix) ------------------
+# The export used to serialize the RAW prior-dataset CPRs, of which only ~30
+# carry coordinates, while 115 rows in current_deals.json were geocoded by
+# pipeline.py --geocode-backfill and carried forward by merge_prior_enrichment.
+# Building the map from enrich_from_flat_record CPRs (which maps latitude/
+# longitude onto gis_lat/gis_lng) restores full coordinate parity, and each
+# feature additionally carries the deal-analysis properties below when the
+# underlying row has them.
+GEO_DEAL_PROPERTIES = ("sale_date", "equity_pct", "lender", "lien_gate",
+                       "blast_tier")
+
+
+def flat_record_has_coordinates(record: dict) -> bool:
+    """Mirror of enrich_from_flat_record's coordinate gate for one flat row."""
+    lat = _coord_float(record.get("latitude"))
+    lng = _coord_float(record.get("longitude"))
+    return bool(lat and lng and lat != 0 and lng != 0)
+
+
+def build_geojson_from_deals(deals: list[dict]) -> dict:
+    """GeoJSON FeatureCollection built from enrich_from_flat_record CPRs.
+
+    Feature count therefore matches the number of geocoded flat rows (~115)
+    instead of the ~30 coordinate-bearing raw-dataset CPRs (F7). Each feature
+    inherits cpr_to_geojson's category/marker properties and is augmented with
+    GEO_DEAL_PROPERTIES from its source row where available.
+
+    Geometry repair: cpr_to_geojson reads cpr.gis_lat/gis_lng raw, which
+    enrich_from_flat_record wraps in ProvenanceField — the legacy export
+    serialized those objects' str() form as coordinates, which no map can
+    plot. Because features pair 1:1 (in order) with the coordinate-bearing
+    rows, the geometry is re-stamped here as plain [lng, lat] JSON numbers.
+    If the base exporter ever drifts from the coordinate gate, features are
+    returned unaugmented with a loud warning rather than mis-paired.
+    """
+    cprs = [enrich_from_flat_record(d) for d in deals]
+    fc = cpr_to_geojson(cprs)
+    coord_deals = [d for d in deals if flat_record_has_coordinates(d)]
+    features = fc.get("features") or []
+    if len(features) != len(coord_deals):
+        print(f"  ⚠️ GeoJSON parity drift: {len(features)} feature(s) vs "
+              f"{len(coord_deals)} geocoded row(s) — deal properties skipped")
+        return fc
+    for feature, deal in zip(features, coord_deals):
+        props = feature.setdefault("properties", {})
+        for key in GEO_DEAL_PROPERTIES:
+            value = deal.get(key)
+            if value not in (None, "", "Unknown"):
+                props[key] = value
+        # Plain-number geometry (see docstring): [lng, lat], GeoJSON order.
+        lat = _coord_float(deal.get("latitude"))
+        lng = _coord_float(deal.get("longitude"))
+        if lat is not None and lng is not None:
+            geometry = feature.setdefault("geometry", {})
+            if geometry.get("type") == "Point":
+                geometry["coordinates"] = [lng, lat]
+    return fc
 
 
 def load_prior_dataset():
@@ -304,8 +448,8 @@ def main():
     # Load prior dataset (335 records with full enrichment)
     cprs = load_prior_dataset()
 
-    # Also live scrape Collin for current notices
-    live_cprs = scrape_live_collin(limit=5)
+    # Also live scrape Collin for current notices (HERMES_SKIP_LIVE=1 skips)
+    live_cprs = fetch_live_cprs(limit=5)
 
     # Merge: prior dataset + live (dedupe by parcel_id)
     seen_ids = {c.parcel_id for c in cprs}
@@ -325,6 +469,15 @@ def main():
     for i, cpr in enumerate(cprs, 1):
         deal = analyze_deal(cpr)
         deals.append(deal)
+
+    # F7 companion: carry CPR-side coordinates (live Collin detail / Dallas
+    # census geocoder) into the flat row so they survive the switch of the
+    # GeoJSON export to flat records below.
+    coords_carried = sum(copy_cpr_coordinates(cpr, deal)
+                         for cpr, deal in zip(cprs, deals))
+    if coords_carried:
+        print(f"  Coordinate passthrough: {coords_carried} row(s) gained "
+              f"latitude/longitude from their CPR")
 
     # Print summary table for all deals with debt
     # Address-quality tally: malformed records stay in the saved dataset but
@@ -399,14 +552,21 @@ def main():
     # geocode-backfill results survive this regeneration (see the
     # MERGE-ON-WRITE comment above).
     merge_prior_enrichment(deals, deals_file)
+    # FN4-lite: append the additive address-quality columns (zip5, city_norm,
+    # addr_valid, invalid_reason) derived from src.addr.normalize_address.
+    for deal in deals:
+        stamp_address_columns(deal)
     # Address-quality gate: the invalid_query marker is runtime-only. Strip it
-    # so the persisted row schema is identical to the legacy dataset format.
+    # so the persisted row schema is legacy keys + the FN4-lite columns only.
     deals_payload = strip_invalid_query_markers(deals)
     deals_path = write_json(deals_file, deals_payload, default=str)
 
     stats_path = write_text(os.path.join(output_dir, "live_portfolio_stats.md"), report)
 
-    geojson_payload = cpr_to_geojson(cprs)
+    # F7: build the map from flat-record CPRs so feature count matches the
+    # geocoded rows in current_deals.json (was ~30 raw-CPR features vs 115
+    # geocoded rows), with richer per-feature deal properties.
+    geojson_payload = build_geojson_from_deals(deals_payload)
     geojson_path = write_json(os.path.join(output_dir, "live_foreclosures.geojson"),
                               geojson_payload, default=str)
     n_features = len(geojson_payload["features"])
