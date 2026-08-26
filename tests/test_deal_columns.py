@@ -139,7 +139,8 @@ def _mixed_deals():
          "latitude": 32.78, "longitude": -96.80,
          "sale_date": "2026-09-01", "equity_pct": 12.5,
          "lender": "EXAMPLE BANK", "lien_gate": "pass", "blast_tier": "T2",
-         "cad_value": 300000, "sqft": 1500},
+         "cad_value": 300000, "sqft": 1500,
+         "parcel_id": "R-0001234", "city_norm": "Dallas"},
         {"address": "202 OAK AVE, PLANO, TX 75023", "county": "collin"},
         {"address": "303 ELM ST, GARLAND, TX 75040", "county": "dallas",
          "latitude": "", "longitude": ""},
@@ -175,12 +176,48 @@ def test_geojson_rich_properties_where_available():
     for key in GEO_DEAL_PROPERTIES:
         assert rich[key] == {"sale_date": "2026-09-01", "equity_pct": 12.5,
                              "lender": "EXAMPLE BANK", "lien_gate": "pass",
-                             "blast_tier": "T2"}[key]
+                             "blast_tier": "T2",
+                             "cad_value": 300000,
+                             "parcel_id": "R-0001234",
+                             "address": "101 MAIN ST, DALLAS, TX 75201",
+                             "city_norm": "Dallas"}[key]
     # ...and omitted (not fabricated) when the row lacks them.
     for key in ("sale_date", "equity_pct", "lender", "lien_gate"):
         assert key not in sparse
     # The analyzed tier overrides the CPR-default blast_tier on rich rows.
     assert rich["blast_tier"] == "T2"
+
+
+def test_geojson_carries_cad_and_dossier_linkage_fields():
+    """Desk-map payload: cad_value sizes /map markers, parcel_id powers the
+    'Open dossier' link (/deals/{parcel}), address/city_norm carry display
+    strings. Each passes through from the flat row verbatim when present
+    and is OMITTED — never zero-filled or fabricated — when absent, so the
+    dashboard's own fallbacks ('$—', hidden link) keep working."""
+    fc = build_geojson_from_deals(_mixed_deals())
+    rich, sparse = (f["properties"] for f in fc["features"])
+    # Passthrough on the rich row: numeric CAD (marker-radius input) and the
+    # dossier linkage trio.
+    assert isinstance(rich["cad_value"], int)
+    assert rich["cad_value"] == 300000
+    assert rich["parcel_id"] == "R-0001234"
+    assert rich["address"] == "101 MAIN ST, DALLAS, TX 75201"
+    assert rich["city_norm"] == "Dallas"
+    # Sparse row carries none of them — no $0/'' fabrication that would make
+    # the map render fake circles or dead dossier links.
+    for key in ("cad_value", "parcel_id", "city_norm"):
+        assert key not in sparse
+    # Payload stays JSON-clean (the /map route reads it back from disk).
+    payload = json.loads(json.dumps(fc))
+    assert payload["features"][0]["properties"]["parcel_id"] == "R-0001234"
+    assert payload["features"][0]["properties"]["cad_value"] == 300000
+
+
+def test_geo_deal_properties_includes_dossier_linkage_contract():
+    """The export tuple itself must carry the map-payload fields — a guard so
+    a future refactor cannot silently drop the dossier linkage again."""
+    assert {"cad_value", "parcel_id", "address", "city_norm"} \
+        <= set(GEO_DEAL_PROPERTIES)
 
 
 def test_geojson_geometry_is_plain_json_numbers():

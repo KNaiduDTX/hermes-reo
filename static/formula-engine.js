@@ -333,6 +333,10 @@
   let compSource = 'mls_agent';
   let initialSnapshot = [];  // captured once for deterministic reset
   let lastComputed = null;   // for the CSV snapshot export
+  // Seeding state (fed by templates/underwriting.html via applyDefaults):
+  let serverVerdict = '';    // GATE-VAL verdict recorded at valuation time
+  let seedFresh = false;     // true until the reviewer moves any input
+  let seededParcel = '';     // parcel id of the last applied default set
 
   function readState() {
     const num = (el, fallback) => {
@@ -414,12 +418,19 @@
     dom.out.rent.textContent = money(a.rent) + '/mo';
     dom.out.conf.textContent = a.confidence.toFixed(2);
 
-    // Verdict gate
-    dom.verdictPill.textContent = c.gate.verdict.toLowerCase();
-    dom.verdictPill.className = 'pill pill-' + c.gate.verdict.toLowerCase();
-    dom.verdictReason.textContent = c.gate.reason;
-    dom.banner.hidden = !c.gate.untrusted;
-    dom.page.classList.toggle('gate-dim', c.gate.untrusted);
+    // Verdict gate. A freshly seeded server verdict (recorded by GATE-VAL at
+    // valuation time, served by /api/uw-defaults) takes precedence on screen
+    // until the reviewer moves any input — then the gate reruns locally.
+    const seededShown = seedFresh && serverVerdict;
+    const shownVerdict = seededShown ? serverVerdict : c.gate.verdict;
+    dom.verdictPill.textContent = shownVerdict.toLowerCase();
+    dom.verdictPill.className = 'pill pill-' + shownVerdict.toLowerCase();
+    dom.verdictReason.textContent = seededShown
+      ? 'GATE-VAL recorded ' + shownVerdict + ' for this deal at valuation time — move any input to re-run the gate locally.'
+      : c.gate.reason;
+    const untrusted = shownVerdict === 'FAIL';
+    dom.banner.hidden = !untrusted;
+    dom.page.classList.toggle('gate-dim', untrusted);
 
     // Model outputs
     renderMetrics(activeModel, c, a);
@@ -461,7 +472,53 @@
     compSource = 'mls_agent';
     setPressed(dom.tabs, 'model', activeModel);
     setPressed(dom.sourceWrap, 'src', compSource);
+    // Reset restores exactly what the server sent for this deal, so its
+    // recorded GATE-VAL verdict is authoritative again.
+    if (serverVerdict) seedFresh = true;
     schedule();
+  }
+
+  /**
+   * Seed hook — push server-computed deal defaults (GET /api/uw-defaults)
+   * into every assumption control. Each value is clamped to its own control
+   * min/max so sliders stay truthful; live labels and all model outputs are
+   * repainted by the regular recompute pass. The response's gate_val_verdict
+   * is held on screen until the reviewer moves an input. Returns the applied
+   * assumption state, or null when the DOM is not ready / payload is invalid.
+   */
+  function applyDefaults(d) {
+    if (!dom || !d || typeof d !== 'object') return null;
+    const num = (v) => { const n = parseFloat(v); return isFinite(n) ? n : null; };
+    const setControl = (el, raw) => {
+      const v = num(raw);
+      if (v === null || !el) return;
+      const min = num(el.min), max = num(el.max);
+      let x = v;
+      if (min !== null) x = Math.max(min, x);
+      if (max !== null) x = Math.min(max, x);
+      el.value = String(x);
+    };
+    setControl(dom.in.arv, d.arv);
+    setControl(dom.in.purchase, d.purchase);
+    setControl(dom.in.rehab, d.rehab);
+    setControl(dom.in.rent, d.rent);
+    setControl(dom.in.contingency, d.contingency == null ? null : d.contingency * 100);
+    setControl(dom.in.maoFactor, d.mao_factor == null ? null : d.mao_factor * 100);
+    setControl(dom.in.loanRate, d.loan_rate == null ? null : d.loan_rate * 100);
+    setControl(dom.in.holding, d.holding);
+    setControl(dom.in.financing, d.financing);
+    setControl(dom.in.closing, d.closing);
+    setControl(dom.in.confidence, d.confidence);
+
+    const v = String(d.gate_val_verdict || '').trim().toUpperCase();
+    serverVerdict = (v === 'PASS' || v === 'WARN' || v === 'FAIL') ? v : '';
+    seedFresh = !!serverVerdict;
+    seededParcel = String(d.parcel_id || '');
+
+    // "Reset assumptions" now returns to this deal's recorded defaults.
+    initialSnapshot = captureInitial();
+    schedule();
+    return readState();
   }
 
   function exportCsv() {
@@ -474,7 +531,7 @@
     const url = URL.createObjectURL(blob);
     const link = document.createElement('a');
     link.href = url;
-    link.download = 'HERMES-REO_underwriting_4003592.csv';
+    link.download = 'HERMES-REO_underwriting_' + (seededParcel || 'deal') + '.csv';
     document.body.appendChild(link);
     link.click();
     link.remove();
@@ -520,7 +577,10 @@
 
   function bind() {
     Object.keys(dom.in).forEach((k) => {
-      dom.in[k].addEventListener('input', schedule);
+      dom.in[k].addEventListener('input', () => {
+        seedFresh = false;   // reviewer touched the model — local gate rules
+        schedule();
+      });
       dom.in[k].addEventListener('change', schedule);
     });
     dom.tabs.addEventListener('click', (ev) => {
@@ -551,9 +611,11 @@
 
   // Node (verification harness) gets the pure surface; the browser boots.
   if (typeof module !== 'undefined' && module.exports) {
-    module.exports = { pmt, computeAll, runSelfTests, sensitivityGrid, rollupRows };
+    module.exports = { pmt, computeAll, runSelfTests, sensitivityGrid, rollupRows, applyDefaults };
   }
   if (typeof window !== 'undefined' && typeof document !== 'undefined') {
+    // Seeding surface consumed by templates/underwriting.html.
+    window.UW_ENGINE = { applyDefaults };
     if (document.readyState === 'loading') {
       document.addEventListener('DOMContentLoaded', boot);
     } else {

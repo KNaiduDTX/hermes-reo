@@ -10,6 +10,20 @@
 
 {% block body %}
 <link rel="stylesheet" href="/static/desk-pages.css">
+<style>
+  /* page-local layout only — colors/fonts come from the shared sheets */
+  .suite-out {
+    display: flex; flex-wrap: wrap; align-items: center;
+    gap: var(--space-2) var(--space-3);
+    padding: 0 var(--space-4) var(--space-2);
+    margin-top: calc(-1 * var(--space-2));
+  }
+  .suite-tail {
+    flex: 1 1 100%; margin: 0; white-space: pre-wrap; overflow-wrap: anywhere;
+    font-size: 11.5px; line-height: 1.55; color: var(--color-neutral-700);
+  }
+  .portal-checked { color: var(--color-neutral-500); }
+</style>
 
 <div class="page-max">
   <div class="mast-kicker">The engine room</div>
@@ -31,8 +45,8 @@
       <div class="kpi-value num">{{ live_count }} / {{ portals | length }}</div>
     </div>
     <div class="kpi">
-      <div class="kpi-label">Last full run</div>
-      <div class="kpi-value num">{{ last_run }}</div>
+      <div class="kpi-label">Last full run <button type="button" class="btn btn-ghost num" id="sys-last-run-refresh" title="Re-fetch /api/run-summary">↻</button></div>
+      <div class="kpi-value num"><span id="sys-last-run" data-last-run-placeholder>…</span></div>
     </div>
   </div>
 
@@ -49,7 +63,7 @@
           <div class="portal-main">
             <div class="portal-name">{{ p.name }}</div>
           </div>
-          <div class="portal-stat num {{ 'portal-stat--dead' if p.status == 'DEAD' }}">{{ p.note }}</div>
+          <div class="portal-stat num {{ 'portal-stat--dead' if p.status == 'DEAD' }}">{{ p.note }}<span class="portal-checked" data-portal-checked hidden></span></div>
         </div>
         {% endfor %}
       </div>
@@ -61,24 +75,36 @@
             <div class="suite-title">Module self-checks</div>
             <div class="suite-sub">{{ modules | length }} modules · __main__ asserts</div>
           </div>
-          <span class="suite-result suite-result--ok num" id="sys-res-checks" hidden>✓ {{ modules | length }}/{{ modules | length }} passed · 8.4s</span>
-          <button class="btn btn-secondary" type="button" data-run="checks">Run</button>
+          <span class="meta num" title="Expected duration of the real pytest core-contract run">~20s</span>
+          <button class="btn btn-secondary" type="button" data-run="/api/system/run-checks" data-suite="checks" title="POST /api/system/run-checks · real pytest core-contract run · ~20s">Run</button>
+        </div>
+        <div class="suite-out" id="sys-res-checks" hidden>
+          <span class="pill pill-pending" id="sys-pill-checks">Running…</span>
+          <div class="suite-tail num" id="sys-tail-checks"></div>
         </div>
         <div class="suite">
           <div class="suite-main">
             <div class="suite-title">Excel recalculation</div>
             <div class="suite-sub">8 deal types · GATE-VAL live · S&amp;U balance</div>
           </div>
-          <span class="suite-result suite-result--ok num" id="sys-res-recalc" hidden>✓ PASS · 4.9s</span>
-          <button class="btn btn-secondary" type="button" data-run="recalc">Run</button>
+          <span class="meta num" title="Expected duration of the real recalc-tier pytest run">~60s</span>
+          <button class="btn btn-secondary" type="button" data-run="/api/system/run-recalc" data-suite="recalc" title="POST /api/system/run-recalc · real recalc-tier pytest run · ~60s">Run</button>
+        </div>
+        <div class="suite-out" id="sys-res-recalc" hidden>
+          <span class="pill pill-pending" id="sys-pill-recalc">Running…</span>
+          <div class="suite-tail num" id="sys-tail-recalc"></div>
         </div>
         <div class="suite">
           <div class="suite-main">
             <div class="suite-title">Live portals</div>
             <div class="suite-sub">Collin Clerk · DCAD · Grayson</div>
           </div>
-          <span class="suite-result suite-result--mixed num" id="sys-res-portals" hidden>{{ live_count }} live · {{ dead_count }} dead · 58s</span>
-          <button class="btn btn-secondary" type="button" data-run="portals">Run</button>
+          <span class="meta num" title="Hits the real county portals — expect ~60s or longer">~60s+</span>
+          <button class="btn btn-secondary" type="button" data-run="/api/system/run-live" data-suite="portals" title="POST /api/system/run-live · hits the real county portals · ~60s+">Run</button>
+        </div>
+        <div class="suite-out" id="sys-res-portals" hidden>
+          <span class="pill pill-pending" id="sys-pill-portals">Running…</span>
+          <div class="suite-tail num" id="sys-tail-portals"></div>
         </div>
       </div>
 
@@ -127,17 +153,149 @@
 {% block scripts %}
 <script>
 (function () {
-  function reveal(key) {
-    var el = document.getElementById('sys-res-' + key);
-    if (el) { el.hidden = false; }
+  'use strict';
+
+  /* ── suite runner ────────────────────────────────────────────────────
+     Each [data-run] button posts to its REAL endpoint (the attribute holds
+     the literal path). Results — the json.tail lines plus an ok/fail pill —
+     render into the matching #sys-res-* reveal span. Durations shown are
+     measured client-side around the actual request. */
+  var KEYS = ['checks', 'recalc', 'portals'];
+  var CLIENT_TIMEOUT_MS = { checks: 330000, recalc: 630000, portals: 630000 }; // mirrors server-side subprocess caps (+grace)
+  var lock = false;
+
+  function $(id) { return document.getElementById(id); }
+
+  function suiteButton(key) {
+    return document.querySelector('[data-run][data-suite="' + key + '"]');
   }
-  Array.prototype.forEach.call(document.querySelectorAll('[data-run]'), function (btn) {
-    btn.addEventListener('click', function () { reveal(btn.getAttribute('data-run')); });
+
+  function setPill(key, state, label) {
+    var pill = $('sys-pill-' + key);
+    if (!pill) return;
+    pill.classList.remove('pill-pending', 'pill-live', 'pill-dead');
+    pill.classList.add(state === 'ok' ? 'pill-live' : state === 'fail' ? 'pill-dead' : 'pill-pending');
+    pill.textContent = label;
+  }
+
+  function renderTail(key, lines) {
+    var tail = $('sys-tail-' + key);
+    if (tail) tail.textContent = (lines && lines.length) ? lines.join('\n') : '(no output)';
+  }
+
+  function runSuite(key) {
+    var btn = suiteButton(key);
+    var out = $('sys-res-' + key);
+    if (!btn || !out || lock) return Promise.resolve(false);
+    lock = true;
+
+    var t0 = Date.now();
+    var prevLabel = btn.textContent;
+    btn.disabled = true;
+    btn.textContent = 'Running…';
+    out.hidden = false;
+    setPill(key, 'busy', 'Running…');
+    var tail = $('sys-tail-' + key);
+    if (tail) tail.textContent = '…';
+
+    var controller = typeof AbortController === 'function' ? new AbortController() : null;
+    var timer = controller ? setTimeout(function () { controller.abort(); }, CLIENT_TIMEOUT_MS[key] || 630000) : null;
+
+    function finish(okState, label, lines) {
+      if (timer) clearTimeout(timer);
+      setPill(key, okState, label + ' · ' + Math.round((Date.now() - t0) / 1000) + 's');
+      renderTail(key, lines);
+      btn.disabled = false;
+      btn.textContent = prevLabel;
+      lock = false;
+      return okState === 'ok';
+    }
+
+    return fetch(btn.getAttribute('data-run'), {
+      method: 'POST',
+      signal: controller ? controller.signal : undefined
+    }).then(function (r) {
+      return r.json().catch(function () { return null; }).then(function (json) {
+        if (!r.ok || !json) {
+          return finish('fail', 'FAIL', ['Request failed (HTTP ' + r.status + ')']);
+        }
+        return finish(json.ok ? 'ok' : 'fail', json.ok ? 'PASS' : 'FAIL', json.tail || []);
+      });
+    }).catch(function (err) {
+      var msg = (err && err.name === 'AbortError') ? 'Request timed out client-side'
+                                                   : 'Request failed (' + ((err && err.message) || 'network error') + ')';
+      return finish('fail', 'FAIL', [msg]);
+    });
+  }
+
+  Array.prototype.forEach.call(document.querySelectorAll('[data-run][data-suite]'), function (btn) {
+    btn.addEventListener('click', function () { runSuite(btn.getAttribute('data-suite')); });
   });
-  var all = document.getElementById('sys-run-all');
+
+  /* Run all: checks first, then recalc, then live — sequentially, aggregated. */
+  var all = $('sys-run-all');
   if (all) {
-    all.addEventListener('click', function () { reveal('checks'); reveal('recalc'); reveal('portals'); });
+    all.addEventListener('click', function () {
+      if (lock) return;
+      var prevLabel = all.textContent;
+      all.disabled = true;
+      all.textContent = 'Running all…';
+      var chain = Promise.resolve(false);
+      var results = [];
+      KEYS.reduce(function (acc, key) {
+        return acc.then(function () { return runSuite(key).then(function (ok) { results.push(ok); }); });
+      }, chain).then(function () {
+        var fails = results.filter(function (ok) { return !ok; }).length;
+        all.textContent = fails ? ('✗ ' + fails + ' of ' + KEYS.length + ' failed') : ('✓ All ' + KEYS.length + ' suites passed');
+        all.disabled = false;
+      }).catch(function () {
+        all.textContent = prevLabel;
+        all.disabled = false;
+        lock = false;
+      });
+    });
   }
+
+  /* ── last full run + portal freshness (/api/run-summary) ───────────── */
+  function fmtWhen(raw) {
+    var ms = Date.parse(String(raw));
+    if (isNaN(ms)) return String(raw);
+    var d = new Date(ms);
+    var months = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
+    function pad(n) { return (n < 10 ? '0' : '') + n; }
+    return months[d.getMonth()] + ' ' + d.getDate() + ' · ' + pad(d.getHours()) + ':' + pad(d.getMinutes());
+  }
+
+  function applyRunSummary(summary) {
+    var el = $('sys-last-run');
+    if (!el || !summary) return;
+    if (!summary.started_at) {
+      el.textContent = 'no runs yet';
+      return;
+    }
+    el.textContent = (summary.mode || 'run') + ' · ' + fmtWhen(summary.started_at);
+
+    /* Portal freshness: only stamp cards when the latest run actually hit portals. */
+    if (summary.mode !== 'live' && summary.mode !== 'geocode') return;
+    var stamp = ' · checked ' + fmtWhen(summary.started_at);
+    Array.prototype.forEach.call(document.querySelectorAll('[data-portal-checked]'), function (span) {
+      span.textContent = stamp;
+      span.hidden = false;
+    });
+  }
+
+  function loadRunSummary() {
+    try {
+      fetch('/api/run-summary')
+        .then(function (r) { return r.ok ? r.json() : null; })
+        .then(applyRunSummary)
+        .catch(function () { /* keep server-rendered page as-is */ });
+    } catch (err) { /* older engines: leave placeholder */ }
+  }
+
+  loadRunSummary();
+  var refresh = $('sys-last-run-refresh');
+  if (refresh) refresh.addEventListener('click', loadRunSummary);
 })();
 </script>
 {% endblock %}

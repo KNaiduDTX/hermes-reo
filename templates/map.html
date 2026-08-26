@@ -17,14 +17,18 @@
 {{ tc(t) }}
 {%- endmacro %}
 
+{# Em-dash fallback is the literal character (not an HTML entity): cadText/
+   cadShort are embedded verbatim into the #map-data JSON payload, and
+   map.js writes them via textContent — an entity string would surface
+   literally as "&mdash;" on client-side re-render. #}
 {% macro money(v) -%}
-{%- if v and v > 0 -%}${'{:,.0f}'.format(v)}{%- else -%}&mdash;{%- endif -%}
+{%- if v and v > 0 -%}${{ '{:,.0f}'.format(v) }}{%- else -%}—{%- endif -%}
 {%- endmacro %}
 
 {% macro money_short(v) -%}
-{%- if v and v > 0 -%}{%- if v >= 1000000 -%}${'%.1f'.format(v / 1000000)}M
-{%- else -%}${'{:,.0f}'.format(v / 1000)}K{%- endif -%}
-{%- else -%}&mdash;{%- endif -%}
+{%- if v and v > 0 -%}{%- if v >= 1000000 -%}${{ '{:.1f}'.format(v / 1000000) }}M
+{%- else -%}${{ '{:,.0f}'.format(v / 1000) }}K{%- endif -%}
+{%- else -%}—{%- endif -%}
 {%- endmacro %}
 
 {# ——— projection: linear fit of the DFW-window bbox into the 1000×700 viewBox.

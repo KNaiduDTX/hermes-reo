@@ -562,7 +562,13 @@ def dedupe_by_property_id(deals: list[dict]) -> list[dict]:
 # feature additionally carries the deal-analysis properties below when the
 # underlying row has them.
 GEO_DEAL_PROPERTIES = ("sale_date", "equity_pct", "lender", "lien_gate",
-                       "blast_tier")
+                       "blast_tier",
+                       # Desk-map payload: cad_value sizes the /map circle
+                       # markers, parcel_id powers the "Open dossier" deep
+                       # link (/deals/{parcel}), address/city_norm carry the
+                       # normalized display strings. Absent values stay
+                       # omitted — the /map route falls back gracefully.
+                       "cad_value", "parcel_id", "address", "city_norm")
 
 
 def flat_record_has_coordinates(record: dict) -> bool:

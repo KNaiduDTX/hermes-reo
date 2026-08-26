@@ -3,7 +3,7 @@
 {% block title %}Pipeline — HERMES REO Diligence Desk{% endblock %}
 
 {% block head_actions %}
-<span class="num pipe-head-meta">Last scrape · Aug 20, 2026</span>
+<span class="num pipe-head-meta" id="headRunMeta" hidden></span>
 <button class="btn btn-secondary" type="button">New scrape</button>
 <button class="btn btn-primary" type="button">Run pipeline</button>
 {% endblock %}
@@ -75,6 +75,7 @@
   .register th { white-space: nowrap; }
   .register th.sortable { cursor: pointer; user-select: none; }
   .register th.sortable:hover { color: var(--color-accent); }
+  .register th.sortable:focus-visible { outline: 2px solid var(--color-accent); outline-offset: -2px; }
   .sort-mark { display: inline-block; min-width: 1ch; margin-left: 2px; color: var(--color-accent); }
   .register th.th-right { text-align: right; }
   .register th.th-center { text-align: center; }
@@ -103,6 +104,8 @@
   .gate-fail { color: #8a2f22; }
 
   .mut { color: var(--color-neutral-400); }
+  /* live run-meta strip — fed once at load by GET /api/run-summary (see scripts block) */
+  .run-meta { margin: -6px 0 var(--space-3); font-size: 11.5px; color: var(--color-neutral-500); }
   .empty-row td { text-align: center; color: var(--color-neutral-600); font-size: 13px; padding: var(--space-4); }
   .reg-foot { margin: var(--space-3) 0 0; font-size: 11.5px; color: var(--color-neutral-600); }
 </style>
@@ -182,6 +185,9 @@
     <span class="shown-count num" id="shownCount">{{ rows|length }} of {{ rows|length }} shown</span>
   </div>
 
+  <!-- live run-meta strip: populated once at load from GET /api/run-summary -->
+  <p class="run-meta num" id="runMeta" hidden></p>
+
   <!-- register -->
   <div class="table-wrap">
     <table class="table num register" id="registerTable">
@@ -191,13 +197,13 @@
           <th class="sortable" tabindex="0" data-sort-key="addr" scope="col">Property<span class="sort-mark" aria-hidden="true"></span></th>
           <th class="sortable" tabindex="0" data-sort-key="county" scope="col">County<span class="sort-mark" aria-hidden="true"></span></th>
           <th class="sortable" tabindex="0" data-sort-key="owner" scope="col">Owner<span class="sort-mark" aria-hidden="true"></span></th>
-          <th class="sortable th-right" data-sort-key="sqft" scope="col">Sqft<span class="sort-mark" aria-hidden="true"></span></th>
-          <th class="sortable th-right" data-sort-key="cad" scope="col">CAD value<span class="sort-mark" aria-hidden="true"></span></th>
-          <th class="sortable th-right" data-sort-key="debt" scope="col">Debt<span class="sort-mark" aria-hidden="true"></span></th>
-          <th class="sortable th-right" data-sort-key="eq" scope="col">Equity<span class="sort-mark" aria-hidden="true"></span></th>
-          <th class="sortable th-right" data-sort-key="ltv" scope="col">LTV<span class="sort-mark" aria-hidden="true"></span></th>
-          <th class="sortable th-right" data-sort-key="mao" scope="col">Prelim MAO<span class="sort-mark" aria-hidden="true"></span></th>
-          <th class="sortable th-center" data-sort-key="tier" scope="col">Tier<span class="sort-mark" aria-hidden="true"></span></th>
+          <th class="sortable th-right" tabindex="0" data-sort-key="sqft" scope="col">Sqft<span class="sort-mark" aria-hidden="true"></span></th>
+          <th class="sortable th-right" tabindex="0" data-sort-key="cad" scope="col">CAD value<span class="sort-mark" aria-hidden="true"></span></th>
+          <th class="sortable th-right" tabindex="0" data-sort-key="debt" scope="col">Debt<span class="sort-mark" aria-hidden="true"></span></th>
+          <th class="sortable th-right" tabindex="0" data-sort-key="eq" scope="col">Equity<span class="sort-mark" aria-hidden="true"></span></th>
+          <th class="sortable th-right" tabindex="0" data-sort-key="ltv" scope="col">LTV<span class="sort-mark" aria-hidden="true"></span></th>
+          <th class="sortable th-right" tabindex="0" data-sort-key="mao" scope="col">Prelim MAO<span class="sort-mark" aria-hidden="true"></span></th>
+          <th class="sortable th-center" tabindex="0" data-sort-key="tier" scope="col">Tier<span class="sort-mark" aria-hidden="true"></span></th>
           <th scope="col">Gates</th>
         </tr>
       </thead>
@@ -213,4 +219,48 @@
 
 {% block scripts %}
 <script src="/static/app-pipeline.js" defer></script>
+<script>
+/* Live run-meta (load-time only): GET /api/run-summary →
+   strip "Last scrape: {mode} · {started_at} · {duration_s}s" + head short date.
+   Both stay hidden when the endpoint returns {} — no simulated fallbacks. */
+(function () {
+  "use strict";
+  function paint(summary) {
+    if (!summary || typeof summary !== "object") return;
+    var mode = summary.mode,
+        started = summary.started_at,
+        duration = Number(summary.duration_s),
+        when = started ? new Date(started) : null;
+    if (!mode || !when || isNaN(when.getTime()) || !isFinite(duration)) return;
+
+    var strip = document.getElementById("runMeta");
+    if (strip) {
+      var m = /^(\d{4}-\d{2}-\d{2})T(\d{2}:\d{2})/.exec(String(started));
+      strip.textContent = "Last scrape: " + mode + " \u00b7 "
+        + (m ? m[1] + " " + m[2] + " UTC" : started)
+        + " \u00b7 " + (Math.round(duration * 10) / 10) + "s";
+      strip.hidden = false;
+    }
+    var head = document.getElementById("headRunMeta");
+    if (head) {
+      head.textContent = "Last scrape \u00b7 " + when.toLocaleDateString("en-US",
+        { month: "short", day: "numeric", year: "numeric" });
+      head.hidden = false;
+    }
+  }
+  function load() {
+    try {
+      fetch("/api/run-summary", { headers: { "Accept": "application/json" } })
+        .then(function (r) { return r.ok ? r.json() : null; })
+        .then(paint)
+        .catch(function () { /* endpoint unreachable → strips stay hidden */ });
+    } catch (e) { /* no fetch support → strips stay hidden */ }
+  }
+  if (document.readyState === "loading") {
+    document.addEventListener("DOMContentLoaded", load);
+  } else {
+    load();
+  }
+})();
+</script>
 {% endblock %}

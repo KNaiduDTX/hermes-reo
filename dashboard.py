@@ -250,7 +250,8 @@ def dossier(request: Request, parcel_id: str):
             "A property-tax lien survives foreclosure — confirm payoff before bidding."
             if surviving else "Gates clear; pricing within bounds."),
         "figures": {
-            "arv": f"${arv_val:,.0f}", "arv_chip": "mls_agent · conf 88%",
+            "arv": f"${arv_val:,.0f}",
+            "arv_chip": _arv_chip(valuation),
             "as_is": f"${money(pv('cad_appraised_value')):,.0f}",
             "as_is_chip": "county CAD · 2026",
             "mao": f"${mao:,.0f}", "mao_chip": f"bid ceiling · ${ceiling:,.0f}",
@@ -309,6 +310,14 @@ def map_page(request: Request):
     return templates.TemplateResponse("map.html", ctx)
 
 
+def _arv_chip(valuation: dict) -> str:
+    """Provenance chip derived from the stored valuation (no hardcoded copy)."""
+    arv = valuation.get("arv") or {}
+    src = str(arv.get("source") or "—")
+    conf = float(arv.get("confidence") or 0)
+    return f"{src} · conf {conf * 100:g}%"
+
+
 def geojson_features(geo: dict) -> list[dict]:
     feats = geo.get("features") or []
     usable = []
@@ -363,14 +372,29 @@ def offers(request: Request, deal_type: str = "DT-AUCTION"):
         blocked = bool(offer.blocked)
     except Exception as exc:  # noqa: BLE001 — UI must never 500 on data gaps
         terms = {"error": str(exc)}
+    from src.policy import EARNEST_MONEY_MIN, EARNEST_MONEY_PCT, OPTION_FEE_MIN, OPTION_FEE_PCT
+    mao_ref = 475_000
+    factor_map = {"DT-PREFORE": 0.80, "DT-TAXDEED": 0.75, "DT-AUCTION": 0.85,
+                  "DT-REO": 0.75, "DT-SHORT": 0.70}
     postures = [
         ("Pre-foreclosure", "80%", "DT-PREFORE"), ("Tax-deed", "75%", "DT-TAXDEED"),
         ("Auction", "85%", "DT-AUCTION"), ("REO", "75%", "DT-REO"),
         ("Short sale", "70%", "DT-SHORT"), ("Wholesale", "blocked", "DT-WHOLESALE"),
     ]
+    def _round100(x):
+        import math as _m
+        return int(_m.floor(x / 100 + 0.5) * 100)
+    computed_terms = {
+        code: {
+            "opening": _round100(mao_ref * factor_map.get(code, 0.85)),
+            "earnest": max(_round100(mao_ref * EARNEST_MONEY_PCT), EARNEST_MONEY_MIN),
+            "option": max(round(mao_ref * OPTION_FEE_PCT), OPTION_FEE_MIN),
+        } for _, _, code in postures if code != "DT-WHOLESALE"
+    }
     ctx = {"request": request, "active": "offers",
            "breadcrumb": "Desk · Offers", "postures": postures,
            "current": deal_type, "terms": terms,
+           "computed_terms": computed_terms, "mao_ref": mao_ref,
            "letter": letter_html, "blocked": blocked}
     return templates.TemplateResponse("offers.html", ctx)
 
@@ -402,6 +426,109 @@ def system(request: Request):
            "codebase": {"loc": f"{loc:,}", "modules": len(modules)},
            "last_run": time.strftime("%b %d %Y")}
     return templates.TemplateResponse("system.html", ctx)
+
+
+
+# --------------------------------------------------------------------------- #
+# Live-system contracts (UI realtime wiring)
+# --------------------------------------------------------------------------- #
+@app.get("/api/run-summary")
+def api_run_summary():
+    """Latest pipeline run summary (mode/counts/duration) or empty object."""
+    return JSONResponse(_read(DATA / "run_summary.json") or {})
+
+
+@app.get("/api/uw-defaults")
+def api_uw_defaults(parcel: str = "4003592"):
+    """Real underwriting defaults derived from a saved valued/plain CPR."""
+    cpr = load_cpr_any(parcel)
+    if cpr is None:
+        raise HTTPException(status_code=404, detail="parcel not found")
+
+    def pv(name, default=None):
+        v = cpr.get(name)
+        if isinstance(v, dict):
+            return v.get("value", default)
+        return v if v is not None else default
+
+    from src.policy import CLOSING_SELL_PCT, HOLDING_UTILITIES_MONTHLY, MAO_FACTOR_DEFAULT
+    from src.underwriting import flip_pnl
+
+    valuation = cpr.get("valuation") or {}
+    arv = float((valuation.get("arv") or {}).get("value") or 0) \
+        or money(pv("cad_appraised_value")) or 750_000
+    rehab = 50_000
+    mao = max(0.0, arv * MAO_FACTOR_DEFAULT - rehab)
+    uw = flip_pnl(arv=arv, purchase=mao, rehab=rehab, holding=5_000,
+                  financing=10_000, closing_buy=5_000,
+                  closing_sell=arv * CLOSING_SELL_PCT)
+    rent = round(money(pv("cad_appraised_value")) * 0.006)
+    return {
+        "parcel_id": str(pv("parcel_id") or parcel),
+        "address": str(pv("situs_address") or ""),
+        "arv": arv, "purchase": mao, "rehab": rehab,
+        "rent": max(rent, 1200), "contingency": 0.20,
+        "mao_factor": MAO_FACTOR_DEFAULT, "loan_rate": 0.061,
+        "holding": 5_000, "financing": 10_000,
+        "closing": round(arv * CLOSING_SELL_PCT),
+        "gate_val_verdict": str(valuation.get("gate_val_verdict") or ""),
+        "confidence": float((valuation.get("arv") or {}).get("confidence") or 0),
+        "net_profit": uw.net_profit, "roi": uw.roi,
+    }
+
+
+@app.post("/api/system/run-checks")
+def api_run_checks():
+    """Actually run the module self-check suite and return real output."""
+    import subprocess
+    proc = subprocess.run(
+        [str(ROOT / ".venv" / "bin" / "python"), "-m", "pytest",
+         "tests/test_cpr_contracts.py", "tests/test_pricing_gates.py",
+         "-q", "--no-header"],
+        capture_output=True, text=True, timeout=300, cwd=str(ROOT))
+    lines = [l for l in proc.stdout.splitlines() if l.strip()][-12:]
+    return {"ok": proc.returncode == 0, "tail": lines,
+            "cmd": "pytest core-contracts"}
+
+
+@app.get("/api/valued-parcels")
+def api_valued_parcels():
+    """Parcels that have a saved CPR or valued file — UI selectors feed on this."""
+    out = []
+    seen = set()
+    patterns = [("valued", DATA.glob("*.valued.json")),
+                ("cpr", DATA.glob("cpr_*.json")),
+                ("fixture", (DATA / "fixtures").glob("fixture_cpr_*.json"))]
+    for source, glob in patterns:
+        for f in glob:
+            pid = f.name.replace(".valued.json", "").replace("cpr_", "").replace("fixture_cpr_", "").replace(".json", "")
+            if pid in seen:
+                continue
+            seen.add(pid)
+            out.append({"parcel_id": pid, "source": source})
+    return {"parcels": out}
+
+
+@app.post("/api/system/run-recalc")
+def api_run_recalc():
+    import subprocess
+    proc = subprocess.run(
+        [str(ROOT / ".venv" / "bin" / "python"), "-m", "pytest",
+         "test_recalc.py", "-m", "recalc", "-q", "--no-header"],
+        capture_output=True, text=True, timeout=600, cwd=str(ROOT))
+    tail = [l for l in proc.stdout.splitlines() if l.strip()][-8:]
+    return {"ok": proc.returncode == 0, "tail": tail}
+
+
+@app.post("/api/system/run-live")
+def api_run_live():
+    import subprocess
+    proc = subprocess.run(
+        [str(ROOT / ".venv" / "bin" / "python"), "-m", "pytest",
+         "test_live_portals.py", "-m", "live", "-q", "--no-header"],
+        capture_output=True, text=True, timeout=600, cwd=str(ROOT))
+    tail = [l for l in proc.stdout.splitlines() if l.strip()][-8:]
+    return {"ok": proc.returncode == 0, "tail": tail}
 
 
 # JSON passthroughs reused from the API server for HTMX/fetch use.

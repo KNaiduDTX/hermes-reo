@@ -28,6 +28,15 @@
   .uw-live { display: inline-flex; align-items: center; gap: 5px; font-size: 10px; letter-spacing: .08em; text-transform: uppercase; color: var(--color-accent); }
   .uw-live .dot { width: 6px; height: 6px; border-radius: 50%; background: var(--color-accent); display: inline-block; }
 
+  /* Live deal chips — populated from /api/uw-defaults */
+  .uw-live-deal { display: flex; align-items: baseline; flex-wrap: wrap; gap: 8px; margin-top: 10px; }
+  .uw-live-deal[hidden] { display: none; }
+  .uw-live-addr { font-family: var(--font-heading); font-weight: 600; font-size: 15px; }
+  .live-chip { font-size: 12px; font-variant-numeric: tabular-nums; padding: 2px 10px; border-radius: 3px; background: var(--color-neutral-100); color: var(--color-neutral-800); }
+  .live-chip-good { background: #e6ede4; color: #33513c; }
+  .live-chip-bad { background: #f2ded8; color: #8a2f22; }
+  .deal-status { font-size: 11px; color: var(--color-neutral-600); }
+
   input[type="range"] { accent-color: var(--color-accent); width: 100%; }
   .uw-panel { display: flex; flex-direction: column; gap: var(--space-4); border: 1px solid var(--color-divider); border-radius: var(--radius-md); padding: var(--space-4); }
   .uw-panel-tight { gap: var(--space-3); }
@@ -105,9 +114,17 @@
 <div class="uw-page" id="uw-page">
 
   <div class="masthead">
-    <div class="mast-kicker">The model · 10022 Plainsman Ln, Frisco · Parcel 4003592</div>
+    <div class="mast-kicker" id="mast-kicker">The model</div>
     <h1 class="mast-title">Underwriting</h1>
     <p class="mast-sub">One set of assumptions drives eight deal models. Change any input and every model recomputes at once — the valuation gate governs whether the ARV can be trusted at all.</p>
+    <div class="uw-live-deal" id="live-deal" hidden>
+      <span class="uw-live"><span class="dot"></span>Live deal:</span>
+      <span class="uw-live-addr" id="live-address"></span>
+      <span aria-hidden="true">·</span>
+      <span class="live-chip" id="chip-net"></span>
+      <span aria-hidden="true">·</span>
+      <span class="live-chip" id="chip-roi"></span>
+    </div>
   </div>
 
   <div class="uw-cols">
@@ -118,31 +135,41 @@
       <div class="uw-panel">
         <div>
           <div class="ctl-row">
+            <label class="ctl-label" for="in-deal">Deal</label>
+            <span class="deal-status" id="deal-status"></span>
+          </div>
+          <select class="input" id="in-deal" aria-label="Deal — parcel with saved defaults">
+            <option value="" selected>Loading deals…</option>
+          </select>
+        </div>
+        <div>
+          <div class="ctl-row">
             <label class="ctl-label" for="in-arv">After-repair value (ARV)</label>
-            <span class="ctl-val" id="out-arv">$750,000</span>
+            <span class="ctl-val" id="out-arv">${{ '{:,}'.format(defaults.arv|int) }}</span>
           </div>
           <input type="range" id="in-arv" min="300000" max="1200000" step="5000" value="{{ defaults.arv|int }}" aria-label="After-repair value">
         </div>
         <div>
           <div class="ctl-row">
             <label class="ctl-label" for="in-purchase">Purchase price</label>
-            <span class="ctl-val" id="out-purchase">$475,000</span>
+            <span class="ctl-val" id="out-purchase">${{ '{:,}'.format(defaults.purchase|int) }}</span>
           </div>
           <input type="range" id="in-purchase" min="100000" max="900000" step="5000" value="{{ defaults.purchase|int }}" aria-label="Purchase price">
         </div>
         <div>
           <div class="ctl-row">
             <label class="ctl-label" for="in-rehab">Rehab budget</label>
-            <span class="ctl-val" id="out-rehab">$50,000</span>
+            <span class="ctl-val" id="out-rehab">${{ '{:,}'.format(defaults.rehab|int) }}</span>
           </div>
           <input type="range" id="in-rehab" min="0" max="300000" step="5000" value="{{ defaults.rehab|int }}" aria-label="Rehab budget">
         </div>
         <div>
           <div class="ctl-row">
             <label class="ctl-label" for="in-rent">Monthly market rent</label>
-            <span class="ctl-val" id="out-rent">$3,900/mo</span>
+            <span class="ctl-val" id="out-rent">${{ '{:,}'.format(defaults.rent|int) }}/mo</span>
           </div>
-          <input type="range" id="in-rent" min="1500" max="8000" step="50" value="{{ defaults.rent|int }}" aria-label="Monthly market rent">
+          <!-- min lowered to 500: /api/uw-defaults floors small-market rent at $1,200 -->
+          <input type="range" id="in-rent" min="500" max="8000" step="50" value="{{ defaults.rent|int }}" aria-label="Monthly market rent">
         </div>
         <div class="uw-grid2">
           <div class="field"><label for="in-contingency">Rehab contingency %</label>
@@ -180,7 +207,7 @@
         <div>
           <div class="ctl-row">
             <label class="ctl-label" for="in-confidence">Confidence score</label>
-            <span class="ctl-val" id="out-conf">0.91</span>
+            <span class="ctl-val" id="out-conf">{{ '%.2f'|format(defaults.confidence) }}</span>
           </div>
           <input type="range" id="in-confidence" min="0.5" max="1" step="0.01" value="{{ '%.2f'|format(defaults.confidence) }}" aria-label="Confidence score">
         </div>
@@ -267,4 +294,124 @@
 
 {% block scripts %}
 <script src="/static/formula-engine.js"></script>
+<script>
+/* Underwriting live-deal seeding — no frameworks, no simulated figures.
+   1. /api/valued-parcels fills the Deal selector (default: first source
+      "valued", else the first parcel on file).
+   2. /api/uw-defaults?parcel=<pid> hydrates every assumption control through
+      the formula engine's applyDefaults() hook, including the recorded
+      GATE-VAL verdict and confidence, and repaints the masthead chips.
+   Changing the selector refetches; a superseded fetch never paints (request
+   token guard). A failed fetch keeps the last good assumption set on screen
+   and reports the gap in #deal-status. */
+(function () {
+  'use strict';
+  var sel, statusEl, kickerEl, liveWrap, addrEl, netChip, roiChip;
+  var reqToken = 0; /* bumped per fetch; stale responses are dropped */
+
+  function getJSON(url) {
+    return fetch(url, { headers: { 'Accept': 'application/json' } })
+      .then(function (r) {
+        if (!r.ok) {
+          var err = new Error('HTTP ' + r.status);
+          err.status = r.status;
+          throw err;
+        }
+        return r.json();
+      });
+  }
+
+  function money(n) {
+    n = parseFloat(n);
+    if (!isFinite(n)) return '—';
+    return (n < 0 ? '−$' : '$') + Math.abs(Math.round(n)).toLocaleString('en-US');
+  }
+
+  /** Paint "Live deal: <address> · net $X · ROI y%" under the masthead. */
+  function renderLiveDeal(d) {
+    var addr = String(d.address || '').trim();
+    addrEl.textContent = addr || ('Parcel ' + (d.parcel_id || ''));
+    var net = parseFloat(d.net_profit);
+    var roi = parseFloat(d.roi);
+    netChip.textContent = 'net ' + money(net);
+    roiChip.textContent = 'ROI ' + (isFinite(roi) ? (roi * 100).toFixed(1) + '%' : '—');
+    netChip.className = 'live-chip ' + (net >= 0 ? 'live-chip-good' : 'live-chip-bad');
+    roiChip.className = 'live-chip ' + (roi >= 0 ? 'live-chip-good' : 'live-chip-bad');
+    liveWrap.hidden = false;
+    kickerEl.textContent = 'The model · Parcel ' + (d.parcel_id || '');
+  }
+
+  function loadDefaults(pid) {
+    if (!pid) return;
+    var token = ++reqToken;
+    statusEl.textContent = 'loading defaults…';
+    getJSON('/api/uw-defaults?parcel=' + encodeURIComponent(pid))
+      .then(function (d) {
+        if (token !== reqToken) return; /* a newer selection superseded us */
+        if (window.UW_ENGINE && typeof window.UW_ENGINE.applyDefaults === 'function') {
+          window.UW_ENGINE.applyDefaults(d);
+        }
+        renderLiveDeal(d);
+        statusEl.textContent = '';
+      })
+      .catch(function (err) {
+        if (token !== reqToken) return; /* superseded — never paint stale */
+        statusEl.textContent = (err && err.status === 404)
+          ? 'no saved CPR defaults for this parcel'
+          : 'defaults unavailable';
+        /* last good assumption set stays on screen */
+      });
+  }
+
+  function loadParcels() {
+    getJSON('/api/valued-parcels')
+      .then(function (data) {
+        var parcels = (data && data.parcels) || [];
+        if (!parcels.length) {
+          sel.innerHTML = '';
+          statusEl.textContent = 'no valued deals on file';
+          return;
+        }
+        sel.innerHTML = '';
+        parcels.forEach(function (p) {
+          var opt = document.createElement('option');
+          opt.value = p.parcel_id;
+          opt.textContent = p.parcel_id + ' · ' + p.source;
+          opt.dataset.source = p.source;
+          sel.appendChild(opt);
+        });
+        var pick = 0; /* default: first entry whose source is "valued" */
+        for (var i = 0; i < parcels.length; i++) {
+          if (parcels[i].source === 'valued') { pick = i; break; }
+        }
+        sel.selectedIndex = pick;
+        loadDefaults(sel.value);
+      })
+      .catch(function () {
+        statusEl.textContent = 'parcel register unavailable';
+      });
+  }
+
+  function init() {
+    sel = document.getElementById('in-deal');
+    statusEl = document.getElementById('deal-status');
+    kickerEl = document.getElementById('mast-kicker');
+    liveWrap = document.getElementById('live-deal');
+    addrEl = document.getElementById('live-address');
+    netChip = document.getElementById('chip-net');
+    roiChip = document.getElementById('chip-roi');
+    if (!sel) return;
+    sel.addEventListener('change', function () { loadDefaults(sel.value); });
+    loadParcels();
+  }
+
+  /* formula-engine.js registered its DOMContentLoaded boot first, so the
+     engine's DOM cache exists before this seeding runs. */
+  if (document.readyState === 'loading') {
+    document.addEventListener('DOMContentLoaded', init);
+  } else {
+    init();
+  }
+})();
+</script>
 {% endblock %}
