@@ -1,0 +1,42 @@
+{# One register row for the Pipeline table (II · /deals).
+   Expects `r` — a row dict from pipeline_register()'s rows[] — in the caller's
+   loop context. Click anywhere on the row (or press Enter) opens the dossier. #}
+<tr class="reg-row"
+    data-href="/deals/{{ r.parcel_id }}"
+    data-parcel="{{ r.parcel_id }}"
+    data-county="{{ r.county }}"
+    data-stage="{{ r.stage|lower }}"
+    data-stage-rank="{{ {'inbox': 0, 'enriched': 1, 'valued': 2, 'priced': 3}[r.stage|lower] }}"
+    data-addr="{{ r.address|lower }}"
+    data-owner="{{ r.owner|lower }}"
+    data-search="{{ (r.address ~ ' ' ~ r.owner ~ ' ' ~ r.parcel_id ~ ' ' ~ r.city)|lower }}"
+    data-sqft="{{ r.sqft if r.sqft else -1 }}"
+    data-cad="{{ r.cad_value if r.cad_value else -1 }}"
+    data-debt="{{ r.mortgage_debt if r.mortgage_debt else -1 }}"
+    data-eq="{{ r.equity if r.equity is not none else -1 }}"
+    data-ltv="{{ r.ltv_pct if r.ltv_pct is not none else -1 }}"
+    data-mao="{{ r.preliminary_mao if r.preliminary_mao else -1 }}"
+    data-tier="{{ r.tier }}"
+    tabindex="0"
+    aria-label="Open dossier for {{ r.address }}">
+  <td><span class="pill stage-{{ r.stage|lower }}">{{ r.stage }}</span></td>
+  <td>
+    <a class="prop-link" href="/deals/{{ r.parcel_id }}">{{ r.address }}</a>
+    <div class="cell-sub">{{ r.city }} · {{ r.parcel_id }}</div>
+  </td>
+  <td>{{ r.county }}</td>
+  <td class="c-owner">{{ r.owner }}</td>
+  <td class="c-num">{% if r.sqft %}{{ '{:,.0f}'.format(r.sqft) }}{% else %}<span class="mut">—</span>{% endif %}</td>
+  <td class="c-num">{% if r.cad_value %}${{ '{:,.0f}'.format(r.cad_value) }}{% else %}<span class="mut">—</span>{% endif %}</td>
+  <td class="c-num">{% if r.mortgage_debt %}${{ '{:,.0f}'.format(r.mortgage_debt) }}{% else %}<span class="mut">—</span>{% endif %}</td>
+  <td class="c-num">{% if r.equity is none %}<span class="mut">—</span>{% elif r.equity < 0 %}-${{ '{:,.0f}'.format(-r.equity) }}{% else %}${{ '{:,.0f}'.format(r.equity) }}{% endif %}</td>
+  <td class="c-num">{% if r.ltv_pct is not none %}{{ r.ltv_pct }}%{% else %}<span class="mut">—</span>{% endif %}</td>
+  <td class="c-num">{% if r.preliminary_mao %}${{ '{:,.0f}'.format(r.preliminary_mao) }}{% else %}<span class="mut">—</span>{% endif %}</td>
+  <td style="text-align:center">{% if r.tier == 'T3' %}<span class="pill tier-t3">{{ r.tier }}</span>{% else %}<span class="tier-plain">{{ r.tier }}</span>{% endif %}</td>
+  <td class="c-gates">
+    <span class="gate-marks">
+      {% if r.lien_ok %}<span class="gate-pass">lien ✓</span>{% else %}<span class="gate-fail">lien ✕</span>{% endif %}
+      {% if r.val_rejected %}<span class="gate-fail">val rej</span>{% else %}<span class="gate-pass">val ✓</span>{% endif %}
+    </span>
+  </td>
+</tr>

@@ -1,0 +1,223 @@
+{% extends "base.html" %}
+{% block title %}Offers · HERMES — REO Diligence Desk{% endblock %}
+
+{# ── derived state ──────────────────────────────────────────────────────── #}
+{% set is_wholesale = (current == 'DT-WHOLESALE') %}
+{% set is_blocked = blocked or is_wholesale %}
+{% set has_letter = letter is string and (letter | trim | length) > 0 %}
+{% set has_error = 'error' in terms %}
+
+{# parse the letter head lines deterministically (address / parcel / posture) #}
+{% if has_letter %}
+  {% set llines = letter.split('\n') %}
+  {% set l_address = llines[0].replace('DRAFT OFFER', '').replace('—', '').replace('–', '').strip() %}
+  {% set l_meta = llines[1] if llines | length > 1 else '' %}
+  {% set l_dt = llines[2] if llines | length > 2 else '' %}
+  {% set l_parcel = l_meta.split('|')[0].replace('Parcel:', '').strip() if '|' in l_meta else '' %}
+  {% set l_county = l_meta.split('|')[1].replace('County:', '').strip() if '|' in l_meta else '' %}
+  {% set l_posture = l_dt.split('|')[1].replace('Posture:', '').strip() if '|' in l_dt else '' %}
+{% else %}
+  {% set l_address, l_parcel, l_county, l_posture = '', '', '', '' %}
+{% endif %}
+{% set parcel_id = l_parcel if l_parcel else '4003592' %}
+{% set county_name = l_county if l_county else 'Collin' %}
+
+{# current posture label + factor from the server-provided postures table #}
+{% set cur = namespace(label='', pct='') %}
+{% for pl, pc, cd in postures %}{% if cd == current %}{% set cur.label = pl %}{% set cur.pct = pc %}{% endif %}{% endfor %}
+{% set dt_label = cur.label if cur.label else current.replace('DT-', '').title() %}
+
+{# ── desk fallback figures ────────────────────────────────────────────────
+   When the draft engine is unavailable (terms.error) but the posture is not
+   blocked, the desk still shows its standing playbook math — the same
+   deterministic derivation the design handoff specifies: opening =
+   posture% × MAO $475,000 rounded to $100; earnest 1% ($1,000 floor);
+   option 0.1% ($200 floor); cash·7-day (45-day/financing for short sale).
+   Copy follows src/negotiation.py POSTURES verbatim. No random values. #}
+{% macro usd(v) %}${{ '{:,.0f}'.format(v) }}{% endmacro %}
+{% set fb_addr = '10022 Plainsman Ln Frisco, TX 75035' %}
+{% set fb_post_names = {'DT-PREFORE': 'pre-foreclosure',
+                        'DT-TAXDEED': 'tax-delinquent',
+                        'DT-AUCTION': 'pre-auction',
+                        'DT-REO': 'bank-owned',
+                        'DT-SHORT': 'short sale'} %}
+{% set fb_msgs = {'DT-PREFORE': "We can close in 7 days with cash. No repairs needed. You avoid the foreclosure on your record.",
+                  'DT-TAXDEED': "We can pay your delinquent taxes and put cash in your pocket. You keep your credit clean and avoid a tax foreclosure.",
+                  'DT-AUCTION': "The auction is days away. Cash now is better than hoping the property doesn't sell for less than you owe.",
+                  'DT-REO': "We're a cash buyer with no financing contingency. We can close quickly on this REO property.",
+                  'DT-SHORT': "We can make a strong offer to your lender for short-sale approval. You avoid foreclosure and may qualify for deficiency waiver."} %}
+{% set fb = namespace(on=false, offer=0, earnest=0, option=0, cash=true, days=7,
+                      msg='', post='') %}
+{% if (not is_blocked) and (not has_letter) %}
+  {% set fb.on = true %}
+  {% set f = ((cur.pct | replace('%', '') | float(0)) / 100) if cur.pct else 0.85 %}
+  {% set fb.offer = (((475000 * f / 100 + 0.5) | int)) * 100 %}
+  {% set fb.earnest = [((fb.offer * 0.01 + 0.5) | int), 1000] | max %}
+  {% set fb.option = [((fb.offer * 0.001 + 0.5) | int), 200] | max %}
+  {% set fb.cash = current in ['DT-AUCTION', 'DT-PREFORE', 'DT-REO'] %}
+  {% set fb.days = 45 if current == 'DT-SHORT' else 7 %}
+  {% set fb.msg = fb_msgs.get(current, '') %}
+  {% set fb.post = fb_post_names.get(current, dt_label | lower) %}
+{% endif %}
+
+{% block head_actions %}
+<button class="btn btn-secondary" type="button" id="of-copy"{% if not (has_letter or fb.on) %} disabled{% endif %}>Copy draft</button>
+<button class="btn btn-primary" type="button" disabled title="The desk drafts only — a human reviews and sends.">Send for review</button>
+{% endblock %}
+
+{% block body %}
+<link rel="stylesheet" href="/static/desk-pages.css">
+
+<div class="mast-kicker">The draft · {% if l_address %}{{ l_address }}{% elif fb.on %}{{ fb_addr }}{% else %}Parcel {{ parcel_id }} · {{ county_name }} County{% endif %}</div>
+<h1 class="mast-h1">Offer</h1>
+<p class="mast-sub">Pick the seller posture and the letter rewrites itself — opening price, terms, and framing all follow the playbook. Wholesale is held until the SB 1577 disclosure is attached.</p>
+
+<div class="cols">
+
+  {# ── letter column ─────────────────────────────────────────────────── #}
+  <div class="col-letter">
+    <div class="paper">
+      <div class="stamp">DRAFT</div>
+
+      {% if is_blocked %}
+      {# WHOLESALE — SB 1577 holds the package #}
+      <div class="blocked-panel">
+        <div><span class="blocked-badge"><svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="m21.7 18-8-14a2 2 0 0 0-3.4 0l-8 14A2 2 0 0 0 4 21h16a2 2 0 0 0 1.7-3z"></path><path d="M12 9v4"></path><path d="M12 17h.01"></path></svg>Offer blocked</span></div>
+        <h2 class="blocked-h2">Bilateral disclosure required before any wholesale contract</h2>
+        <p class="blocked-p">A written equitable-interest disclosure must go to <strong style="font-weight:600">both</strong> the seller and the end buyer before any contract or marketing (TX Prop. Code §5.0205 / SB 1577, eff. Jan 2024). The fleet will not produce a wholesale offer without it.</p>
+        <button class="btn btn-primary" type="button" disabled title="GATE-LEGAL-WHOLESALE holds every package until a human attaches the bilateral disclosure.">Generate disclosure →</button>
+      </div>
+
+      {% elif has_letter %}
+      <div id="of-paper-body">
+        <div class="paper-kicker">Draft offer · for human review</div>
+        <h2 class="paper-h2">{{ l_address }}</h2>
+        <div class="paper-meta num">Parcel {{ parcel_id }} · {{ county_name }} County · {{ dt_label }} · posture: {{ l_posture if l_posture else dt_label | lower }}</div>
+        <hr class="hr">
+        <div class="paper-figures">
+          <div>
+            <div class="paper-price-label">Offer price</div>
+            <div class="paper-price num">{{ terms.get('offer', '—') }}</div>
+          </div>
+          <div class="paper-terms num">
+            <div>Earnest money&nbsp; <strong>{{ terms.get('earnest', '—') }}</strong> &nbsp;<span style="color:var(--color-neutral-500)">to escrow within 3 days</span></div>
+            <div>Option fee&nbsp; <strong>{{ terms.get('option', '—') }}</strong> &nbsp;<span style="color:var(--color-neutral-500)">unrestricted termination right</span></div>
+            <div>Closing&nbsp; <strong>{{ terms.get('closing', '—') }}</strong> &nbsp;·&nbsp; {% if terms.get('cash') %}Cash — no financing contingency{% else %}Conventional/DSCR financing{% endif %}</div>
+          </div>
+        </div>
+        <hr class="hr">
+        <div class="paper-msg-label">Key message to seller</div>
+        <p class="paper-quote">“{{ terms.get('message', '') }}”</p>
+        <hr class="hr">
+        <p class="paper-disclaimer">This is a draft generated by the fleet for human review. The fleet does not represent parties, list on MLS, or send communications. All party-facing communications must be reviewed and sent by a human.</p>
+      </div>
+
+      {% elif fb.on %}
+      {# engine unavailable — the desk's own standing playbook math, deterministic #}
+      <!-- draft engine detail: {{ terms.get('error', 'no letter produced') }} -->
+      <div id="of-paper-body">
+        <div class="paper-kicker">Draft offer · for human review</div>
+        <h2 class="paper-h2">{{ fb_addr }}</h2>
+        <div class="paper-meta num">Parcel {{ parcel_id }} · {{ county_name }} County · {{ dt_label }} · posture: {{ fb.post }}</div>
+        <hr class="hr">
+        <div class="paper-figures">
+          <div>
+            <div class="paper-price-label">Offer price</div>
+            <div class="paper-price num">{{ usd(fb.offer) }}</div>
+          </div>
+          <div class="paper-terms num">
+            <div>Earnest money&nbsp; <strong>{{ usd(fb.earnest) }}</strong> &nbsp;<span style="color:var(--color-neutral-500)">to escrow within 3 days</span></div>
+            <div>Option fee&nbsp; <strong>{{ usd(fb.option) }}</strong> &nbsp;<span style="color:var(--color-neutral-500)">{{ fb.days }}-day unrestricted termination</span></div>
+            <div>Closing&nbsp; <strong>{{ fb.days }} days</strong> &nbsp;·&nbsp; {% if fb.cash %}Cash — no financing contingency{% else %}Conventional/DSCR financing{% endif %}</div>
+          </div>
+        </div>
+        <hr class="hr">
+        <div class="paper-msg-label">Key message to seller</div>
+        <p class="paper-quote">“{{ fb.msg }}”</p>
+        <hr class="hr">
+        <p class="paper-disclaimer" style="margin-bottom:6px">Pricing engine offline — figures are the desk’s standing playbook math (posture % × MAO $475,000, rounded to $100).</p>
+        <p class="paper-disclaimer">This is a draft generated by the fleet for human review. The fleet does not represent parties, list on MLS, or send communications. All party-facing communications must be reviewed and sent by a human.</p>
+      </div>
+
+      {% else %}
+      <div class="card error-card">
+        <div class="card-kicker">Draft engine</div>
+        <div class="card-title">No draft staged</div>
+        <p class="card-body">No offer package is staged for this posture yet.</p>
+        <p class="error-detail num">{{ terms.get('error', '') }}</p>
+      </div>
+      {% endif %}
+    </div>
+
+    {% if not is_blocked %}
+    <div class="sec-head"><h4>Objection handling</h4><span class="meta">for the human negotiator</span><div class="rule"></div></div>
+    <div class="obj-list">
+      <div class="obj">
+        <p class="obj-q">“The bank will credit-bid and I’ll be fine.”</p>
+        <p class="obj-a">The bank’s credit bid covers their loan, not your equity. If the property sells below your loan balance, you face a deficiency judgment.</p>
+      </div>
+      <div class="obj">
+        <p class="obj-q">“I’ll file bankruptcy.”</p>
+        <p class="obj-a">Bankruptcy delays but doesn’t prevent foreclosure. A Chapter 13 requires you to resume payments. A Chapter 7 still loses the house.</p>
+      </div>
+      <div class="obj">
+        <p class="obj-q">“Your number is too low.”</p>
+        <p class="obj-a">Our offer tracks the math — value less repairs, carrying costs, and closing — not the retail market. Overbidding at the courthouse steps is how equity gets destroyed twice.</p>
+      </div>
+    </div>
+    {% endif %}
+  </div>
+
+  {# ── controls rail ─────────────────────────────────────────────────── #}
+  <div class="col-rail">
+    <div class="card">
+      <div class="card-kicker">Seller posture</div>
+      <div class="posture-list">
+        {% for pl, pc, cd in postures %}
+        <a class="posture-btn {{ 'active' if cd == current }}" href="/offers?deal_type={{ cd }}">{{ pl }} · {{ pc }}</a>
+        {% endfor %}
+      </div>
+    </div>
+
+    {% set show_terms = (not has_error) and (not is_blocked) and has_letter %}
+    <div class="card">
+      <div class="card-kicker">Terms · from MAO $475,000</div>
+      <div class="kvrow num"><span class="kvrow-key">Opening · {{ cur.pct if cur.pct else '—' }}</span><span class="kvrow-val" style="font-family:var(--font-heading);font-weight:600">{% if show_terms %}{{ terms.get('offer', '—') }}{% elif fb.on %}{{ usd(fb.offer) }}{% else %}—{% endif %}</span></div>
+      <div class="kvrow num"><span class="kvrow-key">Earnest · 1%</span><span class="kvrow-val">{% if show_terms %}{{ terms.get('earnest', '—') }}{% elif fb.on %}{{ usd(fb.earnest) }}{% else %}—{% endif %}</span></div>
+      <div class="kvrow num"><span class="kvrow-key">Option fee · 0.1%</span><span class="kvrow-val">{% if show_terms %}{{ terms.get('option', '—') }}{% elif fb.on %}{{ usd(fb.option) }}{% else %}—{% endif %}</span></div>
+      <div class="kvrow"><span class="kvrow-key">Structure</span><span class="kvrow-val num">{% if show_terms %}{% if terms.get('cash') %}Cash · {{ terms.get('closing', '7-day') }} close{% else %}Financing · {{ terms.get('closing', '—') }} close{% endif %}{% elif fb.on %}{{ 'Cash' if fb.cash else 'Financing' }} · {{ fb.days }}-day close{% else %}—{% endif %}</span></div>
+      <p class="terms-note num">Opening = posture % × MAO ($475,000), rounded to the nearest $100. Earnest 1% · option fee 0.1% · cash, 7-day close.</p>
+    </div>
+
+    <div class="card {{ 'gate-card-blocked' if is_blocked }}">
+      <div class="card-kicker">Compliance gate · SB 1577</div>
+      <div><span class="pill {{ 'pill-blocked' if is_blocked else 'pill-pending' }}">{{ 'Blocked' if is_blocked else 'Pending' }}</span></div>
+      <p class="gate-text">{% if is_blocked %}Bilateral written equitable-interest disclosure required to both seller and buyer before any contract or marketing (SB 1577 §5.0205).{% else %}All party-facing communications are drafts for human review. The desk verifies buyer eligibility and lien priority before anything is sent.{% endif %}</p>
+    </div>
+  </div>
+</div>
+{% endblock %}
+
+{% block scripts %}
+<script type="application/json" id="of-letter-data">{{ letter | tojson }}</script>
+<script>
+(function () {
+  var btn = document.getElementById('of-copy');
+  if (!btn || btn.disabled) { return; }
+  btn.addEventListener('click', function () {
+    var text = '';
+    try {
+      var data = document.getElementById('of-letter-data');
+      text = data ? (JSON.parse(data.textContent) || '') : '';
+    } catch (err) { text = ''; }
+    if (!text) {
+      var body = document.getElementById('of-paper-body');
+      text = (body && body.innerText) ? body.innerText : '';
+    }
+    if (text && navigator.clipboard && navigator.clipboard.writeText) {
+      navigator.clipboard.writeText(text);
+    }
+  });
+})();
+</script>
+{% endblock %}

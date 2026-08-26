@@ -1,0 +1,270 @@
+{% extends "base.html" %}
+
+{% block title %}Underwriting · HERMES — REO Diligence Desk{% endblock %}
+
+{% block head_actions %}
+<button class="btn btn-secondary" type="button" id="btn-reset">Reset assumptions</button>
+<button class="btn btn-primary" type="button" id="btn-export">Export to Excel</button>
+{% endblock %}
+
+{% block body %}
+<style>
+  /* Page-scoped styles — tokens only, per static/classical.css */
+  .uw-page { max-width: 1240px; }
+  .uw-num { font-variant-numeric: tabular-nums; }
+  .masthead { margin-bottom: var(--space-2); }
+  .mast-kicker { font-size: 11px; letter-spacing: .12em; text-transform: uppercase; color: var(--color-accent); }
+  .mast-title { font-size: 40px; line-height: 1.02; margin: var(--space-2) 0 6px; }
+  .mast-sub { font-size: 14px; color: var(--color-neutral-700); max-width: 64ch; margin: 0; }
+  .uw-cols { display: flex; flex-wrap: wrap; gap: var(--space-6); margin-top: var(--space-6); align-items: flex-start; }
+  .col-a { flex: 1 1 320px; min-width: 0; }
+  .col-b { flex: 2 1 480px; min-width: 0; }
+  .uw-subhead { display: flex; align-items: baseline; gap: 12px; margin: 0 0 var(--space-3); flex-wrap: wrap; }
+  .uw-subhead h4 { margin: 0; }
+  .uw-subhead .rule { flex: 1; height: 1px; background: var(--color-divider); min-width: 20px; }
+  .uw-gap-top { margin-top: var(--space-6); }
+  .uw-section { margin-top: var(--space-8); }
+  .uw-meta { font-size: 11px; color: var(--color-neutral-600); white-space: nowrap; }
+  .uw-live { display: inline-flex; align-items: center; gap: 5px; font-size: 10px; letter-spacing: .08em; text-transform: uppercase; color: var(--color-accent); }
+  .uw-live .dot { width: 6px; height: 6px; border-radius: 50%; background: var(--color-accent); display: inline-block; }
+
+  input[type="range"] { accent-color: var(--color-accent); width: 100%; }
+  .uw-panel { display: flex; flex-direction: column; gap: var(--space-4); border: 1px solid var(--color-divider); border-radius: var(--radius-md); padding: var(--space-4); }
+  .uw-panel-tight { gap: var(--space-3); }
+  .ctl-row { display: flex; justify-content: space-between; align-items: baseline; margin-bottom: 6px; }
+  .ctl-label { font-size: 12px; color: var(--color-neutral-700); }
+  .ctl-val { font-family: var(--font-heading); font-weight: 600; font-size: 16px; font-variant-numeric: tabular-nums; }
+  .uw-grid2 { display: grid; grid-template-columns: 1fr 1fr; gap: var(--space-3); }
+
+  .uw-chips { display: flex; flex-wrap: wrap; gap: 6px; }
+  .uw-tabs { display: flex; flex-wrap: wrap; gap: 6px; margin-bottom: var(--space-4); }
+  .uw-chip { padding: 5px 11px; font-size: 12px; border: 1px solid var(--color-divider); color: var(--color-neutral-700); background: transparent; border-radius: var(--radius-md); cursor: pointer; font-family: var(--font-heading); }
+  .uw-chip:hover { background: color-mix(in srgb, var(--color-text) 7%, transparent); }
+  .uw-chip[aria-pressed="true"] { border-color: var(--color-accent); color: var(--color-accent); background: color-mix(in srgb, var(--color-accent) 10%, transparent); font-weight: 600; }
+  .uw-chip:focus-visible { outline: 2px solid var(--color-accent); outline-offset: 2px; }
+
+  .vg-head { display: flex; align-items: center; justify-content: space-between; }
+  .vg-kicker { font-size: 12px; letter-spacing: .06em; text-transform: uppercase; color: var(--color-neutral-600); }
+  .pill { font-family: var(--font-heading); font-weight: 600; font-size: 12px; letter-spacing: .06em; text-transform: uppercase; padding: 3px 12px; border-radius: 3px; }
+  .pill-pass { background: #e6ede4; color: #3f5d46; }
+  .pill-warn { background: var(--color-accent-100); color: var(--color-accent-800); }
+  .pill-fail { background: #f2ded8; color: #8a2f22; }
+  .vg-reason { margin: 0; font-size: 12px; line-height: 1.5; color: var(--color-neutral-700); }
+
+  .banner { border: 1px solid #d8b3a9; background: #f7ebe7; border-radius: var(--radius-md); padding: var(--space-3) var(--space-4); margin-bottom: var(--space-4); font-size: 13px; color: #8a2f22; }
+  .banner[hidden] { display: none; }
+  .banner strong { font-family: var(--font-heading); font-weight: 600; }
+
+  .metrics { display: flex; flex-wrap: wrap; border: 1px solid var(--color-divider); border-radius: var(--radius-md); overflow: hidden; }
+  .metric { flex: 1; min-width: 132px; padding: var(--space-4); border-left: 1px solid var(--color-divider); }
+  .metric:first-child { border-left: 0; }
+  .metric-k { font-size: 10px; letter-spacing: .09em; text-transform: uppercase; color: var(--color-neutral-600); }
+  .metric-v { font-family: var(--font-heading); font-weight: 600; font-size: 27px; line-height: 1.02; margin-top: 4px; font-variant-numeric: tabular-nums; }
+  .tone-good { color: #33513c; }
+  .tone-bad { color: #8a2f22; }
+  .tone-accent { color: var(--color-accent-800); }
+  .tone-plain { color: var(--color-text); }
+  .tint-good { background: #eef2ec; }
+  .tint-bad { background: #f7ebe7; }
+  .tint-accent { background: var(--color-accent-100); }
+  .uw-note { margin: var(--space-3) 0 0; font-size: 12.5px; line-height: 1.55; color: var(--color-neutral-700); }
+
+  .uw-flip-grid { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 240px); gap: var(--space-6); margin-top: var(--space-6); align-items: start; }
+  .wf-row { display: flex; justify-content: space-between; padding: 6px 0; border-bottom: 1px solid var(--color-divider); font-size: 13px; font-variant-numeric: tabular-nums; }
+  .wf-k { color: var(--color-neutral-700); }
+  .wf-sub { color: var(--color-neutral-500); }
+  .wf-total { padding: 9px 0; font-size: 15px; font-family: var(--font-heading); font-weight: 600; }
+  .wf-total span:first-child { color: var(--color-text); }
+  .uw-ladder { background: var(--color-neutral-100); }
+  .lad-row { display: flex; justify-content: space-between; padding: 3px 0; font-size: 13px; font-variant-numeric: tabular-nums; }
+  .lad-row span:first-child { color: var(--color-neutral-700); }
+  .lad-sm { font-size: 12px; }
+  .lad-xs { font-size: 12px; padding: 2px 0; }
+  .lad-xs span:first-child { color: var(--color-neutral-600); }
+  .lad-target { color: var(--color-accent-800); font-family: var(--font-heading); font-weight: 600; }
+  .lad-target span:first-child { color: var(--color-accent-800); }
+
+  .uw-scroll { overflow-x: auto; }
+  .sens-label { font-family: var(--font-heading); font-weight: 600; }
+  .sens-cell { padding: 8px 6px; text-align: center; font-size: 12px; font-variant-numeric: tabular-nums; }
+  .band-neg { background: #f2e2dd; color: #8a2f22; }
+  .band-mid { background: var(--color-neutral-100); color: var(--color-neutral-800); }
+  .band-pos { background: #e6ede4; color: #33513c; }
+
+  .uw-model-name { font-family: var(--font-heading); font-weight: 600; }
+  .uw-out-cell { font-size: 13px; font-variant-numeric: tabular-nums; }
+  .uw-status-cell { font-size: 12px; }
+
+  /* On GATE-VAL FAIL every model figure dims — status prose keeps its tone. */
+  .gate-dim .uw-figure { color: var(--color-neutral-400) !important; }
+  @media (max-width: 900px) {
+    .uw-flip-grid { grid-template-columns: 1fr; }
+  }
+</style>
+
+<div class="uw-page" id="uw-page">
+
+  <div class="masthead">
+    <div class="mast-kicker">The model · 10022 Plainsman Ln, Frisco · Parcel 4003592</div>
+    <h1 class="mast-title">Underwriting</h1>
+    <p class="mast-sub">One set of assumptions drives eight deal models. Change any input and every model recomputes at once — the valuation gate governs whether the ARV can be trusted at all.</p>
+  </div>
+
+  <div class="uw-cols">
+
+    <!-- ASSUMPTIONS -->
+    <div class="col-a">
+      <div class="uw-subhead"><h4>Assumptions</h4><div class="rule"></div></div>
+      <div class="uw-panel">
+        <div>
+          <div class="ctl-row">
+            <label class="ctl-label" for="in-arv">After-repair value (ARV)</label>
+            <span class="ctl-val" id="out-arv">$750,000</span>
+          </div>
+          <input type="range" id="in-arv" min="300000" max="1200000" step="5000" value="{{ defaults.arv|int }}" aria-label="After-repair value">
+        </div>
+        <div>
+          <div class="ctl-row">
+            <label class="ctl-label" for="in-purchase">Purchase price</label>
+            <span class="ctl-val" id="out-purchase">$475,000</span>
+          </div>
+          <input type="range" id="in-purchase" min="100000" max="900000" step="5000" value="{{ defaults.purchase|int }}" aria-label="Purchase price">
+        </div>
+        <div>
+          <div class="ctl-row">
+            <label class="ctl-label" for="in-rehab">Rehab budget</label>
+            <span class="ctl-val" id="out-rehab">$50,000</span>
+          </div>
+          <input type="range" id="in-rehab" min="0" max="300000" step="5000" value="{{ defaults.rehab|int }}" aria-label="Rehab budget">
+        </div>
+        <div>
+          <div class="ctl-row">
+            <label class="ctl-label" for="in-rent">Monthly market rent</label>
+            <span class="ctl-val" id="out-rent">$3,900/mo</span>
+          </div>
+          <input type="range" id="in-rent" min="1500" max="8000" step="50" value="{{ defaults.rent|int }}" aria-label="Monthly market rent">
+        </div>
+        <div class="uw-grid2">
+          <div class="field"><label for="in-contingency">Rehab contingency %</label>
+            <input class="input uw-num" type="number" id="in-contingency" min="0" max="50" step="5" value="{{ '%.0f'|format(defaults.contingency * 100) }}"></div>
+          <div class="field"><label for="in-mao-factor">MAO factor %</label>
+            <input class="input uw-num" type="number" id="in-mao-factor" min="50" max="80" step="1" value="{{ '%.0f'|format(defaults.mao_factor * 100) }}"></div>
+          <div class="field"><label for="in-loan-rate">Loan rate %</label>
+            <input class="input uw-num" type="number" id="in-loan-rate" min="4" max="12" step="0.05" value="{{ '%.2f'|format(defaults.loan_rate * 100) }}"></div>
+          <div class="field"><label for="in-holding">Holding cost</label>
+            <input class="input uw-num" type="number" id="in-holding" min="0" step="1000" value="{{ defaults.holding|int }}"></div>
+          <div class="field"><label for="in-financing">Financing cost</label>
+            <input class="input uw-num" type="number" id="in-financing" min="0" step="1000" value="{{ defaults.financing|int }}"></div>
+          <div class="field"><label for="in-closing">Closing (buy+sell)</label>
+            <input class="input uw-num" type="number" id="in-closing" min="0" step="1000" value="{{ defaults.closing|int }}"></div>
+        </div>
+      </div>
+
+      <!-- VALUATION GATE -->
+      <div class="uw-subhead uw-gap-top"><h4>Valuation gate</h4><div class="rule"></div></div>
+      <div class="uw-panel uw-panel-tight">
+        <div class="vg-head">
+          <span class="vg-kicker">GATE-VAL verdict</span>
+          <span class="pill pill-pass" id="verdict-pill">Pass</span>
+        </div>
+        <div class="field"><label>Comp source</label>
+          <div class="uw-chips" id="comp-source" role="group" aria-label="Comp source">
+            <button class="uw-chip" type="button" data-src="mls_agent" aria-pressed="true">MLS agent</button>
+            <button class="uw-chip" type="button" data-src="appraiser_bpo" aria-pressed="false">Appraiser BPO</button>
+            <button class="uw-chip" type="button" data-src="title_feed" aria-pressed="false">Title feed</button>
+            <button class="uw-chip" type="button" data-src="vendor_avm" aria-pressed="false">Vendor AVM</button>
+            <button class="uw-chip" type="button" data-src="assessed_only" aria-pressed="false">Assessed</button>
+            <button class="uw-chip" type="button" data-src="zestimate_only" aria-pressed="false">Zestimate</button>
+          </div>
+        </div>
+        <div>
+          <div class="ctl-row">
+            <label class="ctl-label" for="in-confidence">Confidence score</label>
+            <span class="ctl-val" id="out-conf">0.91</span>
+          </div>
+          <input type="range" id="in-confidence" min="0.5" max="1" step="0.01" value="{{ '%.2f'|format(defaults.confidence) }}" aria-label="Confidence score">
+        </div>
+        <p class="vg-reason" id="verdict-reason"></p>
+      </div>
+    </div>
+
+    <!-- OUTPUTS -->
+    <div class="col-b">
+      <div class="uw-subhead">
+        <h4>Deal models</h4>
+        <span class="uw-live"><span class="dot"></span>Live</span>
+        <div class="rule"></div>
+      </div>
+
+      <div class="uw-tabs" id="model-tabs" role="group" aria-label="Deal model">
+        <button class="uw-chip" type="button" data-model="flip" aria-pressed="true">Fix &amp; Flip</button>
+        <button class="uw-chip" type="button" data-model="brrrr" aria-pressed="false">BRRRR</button>
+        <button class="uw-chip" type="button" data-model="rental" aria-pressed="false">Rental DCF</button>
+        <button class="uw-chip" type="button" data-model="taxdeed" aria-pressed="false">Tax-Deed</button>
+        <button class="uw-chip" type="button" data-model="auction" aria-pressed="false">Auction Bid</button>
+      </div>
+
+      <div class="banner" id="gate-banner" hidden><strong>GATE-VAL FAIL.</strong> The ARV is not trusted, so every model below is advisory only — the fleet will not price or offer on a rejected valuation.</div>
+
+      <div class="metrics" id="metrics-row" aria-live="polite"></div>
+      <p class="uw-note" id="model-note"></p>
+
+      <!-- flip-only: waterfall + ladder -->
+      <div class="uw-flip-grid" id="flip-extra">
+        <div>
+          <div class="wf-row"><span class="wf-k">After-repair value</span><span class="uw-figure" id="wf-arv"></span></div>
+          <div class="wf-row"><span class="wf-k">− Purchase</span><span class="uw-figure" id="wf-purchase"></span></div>
+          <div class="wf-row"><span class="wf-k">− Rehab <span class="wf-sub">(+<span id="wf-cont"></span>)</span></span><span class="uw-figure" id="wf-rehab"></span></div>
+          <div class="wf-row"><span class="wf-k">− Holding</span><span class="uw-figure" id="wf-holding"></span></div>
+          <div class="wf-row"><span class="wf-k">− Financing</span><span class="uw-figure" id="wf-financing"></span></div>
+          <div class="wf-row"><span class="wf-k">− Closing</span><span class="uw-figure" id="wf-closing"></span></div>
+          <div class="wf-row wf-total"><span>Net profit</span><span class="uw-figure" id="wf-net"></span></div>
+        </div>
+        <aside class="card uw-ladder">
+          <div class="card-kicker">Offer ladder</div>
+          <div class="lad-row lad-sm"><span>Opening · 85%</span><span class="uw-figure" id="lad-opening"></span></div>
+          <div class="lad-row lad-target"><span>Target · MAO</span><span class="uw-figure" id="lad-target"></span></div>
+          <div class="lad-row lad-sm"><span>Walk-away · 105%</span><span class="uw-figure" id="lad-walk"></span></div>
+          <hr class="hr">
+          <div class="lad-row lad-xs"><span>All-in cost</span><span class="uw-figure" id="lad-cost"></span></div>
+        </aside>
+      </div>
+    </div>
+  </div>
+
+  <!-- sensitivity (flip only) -->
+  <section class="uw-section" id="sens-section">
+    <div class="uw-subhead">
+      <h4>Sensitivity · flip net profit</h4>
+      <div class="rule"></div>
+      <span class="uw-meta">ARV Δ (rows) × rehab Δ (cols)</span>
+    </div>
+    <div class="uw-scroll">
+      <table class="table uw-num" style="min-width:560px">
+        <thead><tr>
+          <th style="text-align:left">ARV Δ</th>
+          <th style="text-align:center">Rehab -10%</th>
+          <th style="text-align:center">Rehab 0%</th>
+          <th style="text-align:center">Rehab +10%</th>
+          <th style="text-align:center">Rehab +20%</th>
+        </tr></thead>
+        <tbody id="sens-body"></tbody>
+      </table>
+    </div>
+  </section>
+
+  <!-- roll-up -->
+  <section class="uw-section">
+    <div class="uw-subhead"><h4>All eight models · live snapshot</h4><div class="rule"></div></div>
+    <table class="table">
+      <thead><tr><th>Deal type</th><th>Headline output</th><th>Gate / status</th></tr></thead>
+      <tbody id="rollup-body"></tbody>
+    </table>
+  </section>
+
+</div>
+{% endblock %}
+
+{% block scripts %}
+<script src="/static/formula-engine.js"></script>
+{% endblock %}

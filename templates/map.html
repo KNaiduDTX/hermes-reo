@@ -1,0 +1,220 @@
+{% extends "base.html" %}
+
+{% block title %}HERMES — Map · REO Diligence Desk{% endblock %}
+
+{# ——— display helpers (no scraped ALL-CAPS reaches the page un-titled) ——— #}
+{% macro tc(s) -%}
+{%- set out = [] -%}
+{%- for w in (s or '').split() -%}
+{%- if w.isupper() or w.islower() -%}{%- set _ = out.append(w.capitalize()) -%}
+{%- else -%}{%- set _ = out.append(w) -%}{%- endif -%}
+{%- endfor -%}
+{{ out|join(' ') }}
+{%- endmacro %}
+
+{% macro short_title(s) -%}
+{%- set t = (s or '').split(', Texas')[0].split(', TX')[0]|trim -%}
+{{ tc(t) }}
+{%- endmacro %}
+
+{% macro money(v) -%}
+{%- if v and v > 0 -%}${'{:,.0f}'.format(v)}{%- else -%}&mdash;{%- endif -%}
+{%- endmacro %}
+
+{% macro money_short(v) -%}
+{%- if v and v > 0 -%}{%- if v >= 1000000 -%}${'%.1f'.format(v / 1000000)}M
+{%- else -%}${'{:,.0f}'.format(v / 1000)}K{%- endif -%}
+{%- else -%}&mdash;{%- endif -%}
+{%- endmacro %}
+
+{# ——— projection: linear fit of the DFW-window bbox into the 1000×700 viewBox.
+     Leads outside the DFW window (bad geocodes) are pinned to a deterministic
+     register along the bottom-left edge and styled as off-grid. ——— #}
+{% set WIN = {'lng0': -97.4, 'lng1': -96.1, 'lat0': 32.3, 'lat1': 33.7} %}
+{% set X0, X1, Y0, Y1 = 30, 970, 30, 670 %}
+
+{% set bb = namespace(on=false, minlng=0.0, maxlng=0.0, minlat=0.0, maxlat=0.0) %}
+{% for p in points %}
+{%- if p.lng is number and p.lat is number
+       and WIN.lng0 <= p.lng <= WIN.lng1 and WIN.lat0 <= p.lat <= WIN.lat1 -%}
+  {%- if not bb.on -%}
+    {% set bb.on = true %}{% set bb.minlng = p.lng %}{% set bb.maxlng = p.lng %}
+    {% set bb.minlat = p.lat %}{% set bb.maxlat = p.lat %}
+  {%- else -%}
+    {%- if p.lng < bb.minlng %}{% set bb.minlng = p.lng %}{% endif -%}
+    {%- if p.lng > bb.maxlng %}{% set bb.maxlng = p.lng %}{% endif -%}
+    {%- if p.lat < bb.minlat %}{% set bb.minlat = p.lat %}{% endif -%}
+    {%- if p.lat > bb.maxlat %}{% set bb.maxlat = p.lat %}{% endif -%}
+  {%- endif -%}
+{%- endif -%}
+{% endfor %}
+{% set dlng = (bb.maxlng - bb.minlng) if bb.maxlng > bb.minlng else 0.000001 %}
+{% set dlat = (bb.maxlat - bb.minlat) if bb.maxlat > bb.minlat else 0.000001 %}
+
+{% set ENR = [] %}
+{% set pin = namespace(n=0) %}
+{% for p in points %}
+{%- set ingrid = p.lng is number and p.lat is number
+                 and WIN.lng0 <= p.lng <= WIN.lng1 and WIN.lat0 <= p.lat <= WIN.lat1 -%}
+{%- if ingrid -%}
+  {% set qx = X0 + ((p.lng - bb.minlng) / dlng) * (X1 - X0) %}
+  {% set qy = Y0 + ((bb.maxlat - p.lat) / dlat) * (Y1 - Y0) %}
+  {% set og = false %}
+{%- else -%}
+  {% set qx = 26 + pin.n * 20 %}{% set qy = 676 %}{% set og = true %}
+  {% set pin.n = pin.n + 1 %}
+{%- endif -%}
+{%- set county = p.county or '—' -%}
+{%- set cadv = p.cad or 0 -%}
+{% set _ = ENR.append({
+    'id': p.id,
+    'x': '%.1f'|format(qx), 'y': '%.1f'|format(qy),
+    'r': '%.1f'|format(4 + ([6, cadv / 260000]|min)),
+    'og': og,
+    'county': county,
+    'cls': 'dot-collin' if county == 'Collin' else 'dot-dallas',
+    'short': short_title(p.title),
+    'full': tc(p.title),
+    'loc': (tc(p.city) if p.city else '—') ~ ' · ' ~ county,
+    'parcel': p.parcel or '',
+    'cadText': money(cadv),
+    'cadShort': money_short(cadv)
+}) %}
+{% endfor %}
+
+{% set sel = ENR[0] if ENR else none %}
+{% set offgrid_n = ENR | selectattr('og') | list | length %}
+{% set plot_n = ENR | rejectattr('og') | list | length %}
+
+{% block head_actions %}
+<div class="seg" id="map-seg" role="group" aria-label="Filter map by county">
+  <label class="seg-opt"><input type="radio" name="map-county" value="All" checked>All counties</label>
+  <label class="seg-opt"><input type="radio" name="map-county" value="Collin">Collin</label>
+  <label class="seg-opt"><input type="radio" name="map-county" value="Dallas">Dallas</label>
+</div>
+{% endblock %}
+
+{% block body %}
+<style>
+  /* — IV · Map page-scoped styles (design tokens from classical.css) — */
+  .map-kicker { font-size: 11px; letter-spacing: .12em; text-transform: uppercase; color: var(--color-accent); }
+  .map-sub { font-size: 14px; color: var(--color-neutral-700); max-width: 60ch; margin: 0; }
+  .map-cols { display: flex; flex-wrap: wrap; gap: var(--space-6); margin-top: var(--space-5); align-items: start; }
+  .map-frame-col { flex: 2 1 520px; min-width: 0; }
+  .map-rail { flex: 1 1 300px; min-width: 0; display: flex; flex-direction: column; gap: var(--space-4); }
+  .map-frame { border: 6px solid var(--color-surface); outline: 1px solid var(--color-divider); border-radius: 2px; background: #efece7; }
+  .map-frame svg { width: 100%; height: auto; display: block; }
+  .graticule { stroke: var(--color-neutral-300); stroke-width: 1; }
+  .map-cap { display: flex; flex-wrap: wrap; gap: var(--space-4); margin-top: var(--space-3); font-size: 11.5px; color: var(--color-neutral-700); align-items: center; }
+  .map-cap .sw { display: inline-flex; align-items: center; gap: 6px; }
+  .map-cap .note { color: var(--color-neutral-500); }
+  .map-dot { fill: transparent; stroke-width: 2; cursor: pointer; }
+  .map-dot.dot-collin { stroke: var(--color-accent); }
+  .map-dot.dot-dallas { stroke: var(--color-neutral-700); }
+  .map-dot:hover { stroke-width: 3; }
+  .map-dot.is-selected { fill: var(--color-accent); stroke: var(--color-accent); }
+  .map-dot.offgrid { stroke: var(--color-neutral-400); stroke-dasharray: 3 3; opacity: .55; }
+  .map-list { max-height: 320px; overflow: auto; margin-top: 8px; }
+  .map-row { display: flex; justify-content: space-between; align-items: center; gap: 8px; padding: 8px var(--space-3); border-top: 1px solid var(--color-divider); cursor: pointer; background: transparent; }
+  .map-row:hover { background: color-mix(in srgb, var(--color-text) 4%, transparent); }
+  .map-row.is-selected { background: color-mix(in srgb, var(--color-accent) 10%, transparent); }
+  .map-row-main { min-width: 0; }
+  .map-row-title { font-size: 12px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .map-row-sub { font-size: 10px; color: var(--color-neutral-500); }
+  .map-row-val { font-size: 11.5px; color: var(--color-neutral-700); flex: none; }
+  .kv { display: flex; justify-content: space-between; gap: 10px; font-size: 12.5px; padding: 4px 0; border-bottom: 1px solid var(--color-divider); }
+  .kv > span:first-child { color: var(--color-neutral-700); }
+  .kv > span:last-child { text-align: right; }
+  .map-muted { font-size: 11.5px; color: var(--color-neutral-500); text-align: center; padding: 2px 0; }
+  .num { font-variant-numeric: tabular-nums; }
+  [hidden], .map-hidden { display: none !important; }
+</style>
+
+<div class="map-kicker">The territory · Dallas&ndash;Fort Worth</div>
+<h1 style="font-size:40px;line-height:1.02;margin:var(--space-2) 0 6px">Map</h1>
+<p class="map-sub">Every geocoded lead, plotted by situs coordinate. Circles are drawn as strokes &mdash; gold for Collin, ink for Dallas &mdash; and sized to CAD value. Click a marker to open its record.</p>
+
+{% if ENR %}
+<div class="map-cols">
+
+  <!-- MAP -->
+  <div class="map-frame-col">
+    <div class="map-frame">
+      <svg viewBox="0 0 1000 700" role="img" aria-label="Scatter map of geocoded foreclosure leads across the Dallas–Fort Worth metroplex">
+        <rect x="0" y="0" width="1000" height="700" fill="#efece7"></rect>
+        <g class="graticule" aria-hidden="true">
+          <line x1="0" y1="175" x2="1000" y2="175"></line>
+          <line x1="0" y1="350" x2="1000" y2="350"></line>
+          <line x1="0" y1="525" x2="1000" y2="525"></line>
+          <line x1="250" y1="0" x2="250" y2="700"></line>
+          <line x1="500" y1="0" x2="500" y2="700"></line>
+          <line x1="750" y1="0" x2="750" y2="700"></line>
+        </g>
+        <text x="16" y="30" font-size="17" fill="var(--color-neutral-500)" style="font-family:var(--font-heading);letter-spacing:.14em;text-transform:uppercase">Dallas&ndash;Fort Worth Metroplex</text>
+        <text x="984" y="686" text-anchor="end" font-size="11" fill="var(--color-neutral-500)" style="font-variant-numeric:tabular-nums">{{ plot_n }} situs coordinates · Census geocoder</text>
+        <g id="map-dots">
+          {%- for q in ENR -%}
+          <circle class="map-dot {{ q.cls }}{{ ' offgrid' if q.og }}{{ ' is-selected' if q.id == sel.id }}"
+                  data-id="{{ q.id }}" data-county="{{ q.county }}"
+                  cx="{{ q.x }}" cy="{{ q.y }}" r="{{ q.r }}"
+                  tabindex="0" role="button"
+                  aria-pressed="{{ 'true' if q.id == sel.id else 'false' }}"
+                  aria-label="{{ q.full }}, {{ q.loc }}">
+            <title>{{ q.full }} — {{ q.loc }}{% if q.og %} · off-grid, outside DFW window{% endif %}</title>
+          </circle>
+          {%- endfor -%}
+        </g>
+      </svg>
+    </div>
+    <div class="map-cap">
+      <span class="sw"><svg width="16" height="16" aria-hidden="true"><circle cx="8" cy="8" r="6" fill="none" stroke="var(--color-accent)" stroke-width="2"></circle></svg>Collin</span>
+      <span class="sw"><svg width="16" height="16" aria-hidden="true"><circle cx="8" cy="8" r="6" fill="none" stroke="var(--color-neutral-700)" stroke-width="2"></circle></svg>Dallas</span>
+      <span class="sw"><svg width="16" height="16" aria-hidden="true"><circle cx="8" cy="8" r="6" fill="var(--color-accent)" stroke="var(--color-accent)" stroke-width="2"></circle></svg>Selected</span>
+      <span class="note">Circle size &prop; CAD value{% if offgrid_n %} &middot; {{ offgrid_n }} lead{{ 's' if offgrid_n != 1 }} off-grid (outside DFW){% endif %}</span>
+    </div>
+  </div>
+
+  <!-- RAIL -->
+  <div class="map-rail">
+    <div class="card">
+      <div class="card-kicker">Selected · <span id="map-sel-county">{{ sel.county }}</span></div>
+      <div class="card-title" id="map-sel-title" style="font-size:18px">{{ sel.short }}</div>
+      <div class="kv num"><span>CAD value</span><span id="map-sel-cad">{{ sel.cadText }}</span></div>
+      <div class="kv"><span>Location</span><span id="map-sel-loc">{{ sel.loc }}</span></div>
+      <div class="kv num"><span>Parcel</span><span id="map-sel-parcel">{{ sel.parcel if sel.parcel else '—' }}</span></div>
+      <a id="map-sel-link" class="btn btn-primary btn-block" href="/deals/{{ sel.parcel }}" style="text-decoration:none"{% if not sel.parcel %} hidden{% endif %}>Open dossier &rarr;</a>
+      <div id="map-sel-nolink" class="map-muted"{% if sel.parcel %} hidden{% endif %}>Dossier pending &mdash; this lead is not yet matched to a parcel.</div>
+    </div>
+
+    <div class="card" style="padding:0;overflow:hidden">
+      <div class="card-kicker" style="padding:var(--space-3) var(--space-3) 0">Mapped leads · <span class="num" id="map-shown">{{ ENR | length }}</span></div>
+      <div class="map-list" id="map-list">
+        {%- for q in ENR -%}
+        <div class="map-row{{ ' is-selected' if q.id == sel.id }}" data-id="{{ q.id }}" data-county="{{ q.county }}"
+             role="button" tabindex="0" aria-selected="{{ 'true' if q.id == sel.id else 'false' }}">
+          <div class="map-row-main">
+            <div class="map-row-title">{{ q.short }}</div>
+            <div class="map-row-sub">{{ q.loc }}</div>
+          </div>
+          <span class="num map-row-val">{{ q.cadShort }}</span>
+        </div>
+        {%- endfor -%}
+      </div>
+    </div>
+  </div>
+</div>
+{% else %}
+<div class="card" style="margin-top:var(--space-5)">
+  <div class="card-kicker">The territory</div>
+  <div class="card-title">No geocoded leads yet</div>
+  <p class="card-body">Run the foreclosure sweep to populate the territory. Every plotted lead appears here with its CAD value and county.</p>
+</div>
+{% endif %}
+{% endblock %}
+
+{% block scripts %}
+{% if ENR %}
+<script id="map-data" type="application/json">{{ ENR | tojson }}</script>
+<script src="/static/map.js"></script>
+{% endif %}
+{% endblock %}

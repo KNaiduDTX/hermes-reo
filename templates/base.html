@@ -1,0 +1,50 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>{% block title %}HERMES — REO Diligence Desk{% endblock %}</title>
+<link rel="stylesheet" href="/static/classical.css">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link href="https://fonts.googleapis.com/css2?family=Cormorant+Garamond:wght@500;600;700&display=swap" rel="stylesheet">
+</head>
+<body>
+<div class="app">
+  <aside class="sidebar">
+    <div class="brand">
+      <div class="brand-name">HERMES</div>
+      <div class="brand-sub">REO DILIGENCE DESK</div>
+      <div class="hr"></div>
+    </div>
+    <nav class="nav">
+      {% set nav = [
+        ("I", "Portfolio", "/", "portfolio"),
+        ("II", "Pipeline", "/deals", "pipeline"),
+        ("III", "Dossier", "/deals/4003592", "dossier"),
+        ("IV", "Map", "/map", "map"),
+        ("V", "Underwriting", "/underwriting", "underwriting"),
+        ("VI", "Offers", "/offers", "offers"),
+        ("VII", "System", "/pipeline", "system"),
+      ] %}
+      {% for numeral, label, href, key in nav %}
+      <a class="nav-item {{ 'active' if active == key }}" href="{{ href }}">
+        <span class="nav-numeral">{{ numeral }}</span><span>{{ label }}</span>
+      </a>
+      {% endfor %}
+    </nav>
+    <div class="sidebar-footer">
+      <span class="tag tag-neutral">LEGAL-RULES v1.0</span>
+      <p class="foot-note">Every output is a draft for human review. The desk does not send.</p>
+    </div>
+  </aside>
+  <main class="main">
+    <header class="running-head">
+      <div class="crumb">{{ breadcrumb }}</div>
+      <div class="head-actions">{% block head_actions %}{% endblock %}</div>
+    </header>
+    <div class="page-body">{% block body %}{% endblock %}</div>
+  </main>
+</div>
+{% block scripts %}{% endblock %}
+</body>
+</html>

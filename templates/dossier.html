@@ -1,0 +1,549 @@
+{% extends "base.html" %}
+{% block title %}Dossier · Parcel {{ parcel_id }} — HERMES{% endblock %}
+
+{% block head_actions %}
+<button class="btn btn-secondary" type="button" title="Clerk search is a human-review action (Phase 2A)">Run clerk search</button>
+<a class="btn btn-primary" href="/offers">Generate offer</a>
+{% endblock %}
+
+{% block body %}
+<style>
+  /* — Dossier page layer (tokens from classical.css; page-specific classes only) — */
+  .num { font-variant-numeric: tabular-nums; }
+  .dossier { max-width: 1240px; padding: var(--space-6); padding-bottom: var(--space-8); }
+  .ta-c { text-align: center; }
+  .ta-r { text-align: right; }
+  .scroll-x { overflow-x: auto; }
+  .oxblood { color: #8a2f22; }
+  .dash { color: var(--color-neutral-500); }
+
+  /* masthead */
+  .masthead { display: flex; justify-content: space-between; align-items: flex-start; gap: var(--space-6); }
+  .kicker { font-size: 11px; letter-spacing: .12em; text-transform: uppercase; color: var(--color-accent); }
+  .mast-title { font-size: 40px; line-height: 1.02; margin: var(--space-2) 0 6px; }
+  .mast-sub { font-size: 14px; color: var(--color-neutral-700); }
+  .mast-badges { display: flex; gap: 8px; flex: none; align-items: center; justify-content: flex-end; flex-wrap: wrap; }
+  .badge {
+    font-family: var(--font-heading); font-weight: var(--font-heading-weight);
+    font-size: 10.5px; letter-spacing: .06em; text-transform: uppercase;
+    padding: 3px 10px; border-radius: 3px;
+    border: 1px solid var(--color-divider); color: var(--color-neutral-700); white-space: nowrap;
+  }
+  .badge-accent { background: var(--color-accent-100); color: var(--color-accent-800); border-color: var(--color-accent-300); }
+  .badge-pass { background: #e6ede4; color: #3f5d46; border-color: #bcccb7; }
+
+  /* verdict strip */
+  .verdict {
+    margin-top: var(--space-4); border: 1px solid var(--color-divider); border-radius: var(--radius-md);
+    padding: var(--space-3) var(--space-4); display: flex; flex-wrap: wrap; align-items: center;
+    gap: var(--space-3) var(--space-4); background: var(--color-neutral-100);
+  }
+  .verdict-gates { display: flex; gap: 8px; flex-wrap: wrap; }
+  .gate-pill {
+    display: inline-flex; align-items: center; gap: 5px;
+    font-family: var(--font-heading); font-weight: var(--font-heading-weight);
+    font-size: 11px; letter-spacing: .05em; text-transform: uppercase;
+    padding: 3px 10px; border-radius: 3px; background: #e6ede4; color: #3f5d46;
+  }
+  .gate-pill--hitl { background: var(--color-accent-100); color: var(--color-accent-800); }
+  .gate-pill--idle { background: transparent; border: 1px solid var(--color-divider); color: var(--color-neutral-600); }
+  .vrule { width: 1px; height: 26px; background: var(--color-divider); }
+  .synthesis { margin: 0; flex: 1 1 260px; min-width: 0; font-size: 13.5px; line-height: 1.5; color: var(--color-neutral-800); }
+  .synthesis strong { font-family: var(--font-heading); font-weight: var(--font-heading-weight); }
+
+  /* figures band */
+  .fig-band { margin-top: var(--space-4); display: flex; flex-wrap: wrap; border: 1px solid var(--color-divider); border-radius: var(--radius-md); }
+  .fig-cell { flex: 1; min-width: 150px; padding: var(--space-3) var(--space-4); border-left: 1px solid var(--color-divider); }
+  .fig-cell:first-child { border-left: 0; }
+  .fig-label { font-size: 10px; letter-spacing: .09em; text-transform: uppercase; color: var(--color-neutral-600); }
+  .fig-value { font-family: var(--font-heading); font-weight: var(--font-heading-weight); font-size: 27px; line-height: 1.05; margin-top: 4px; }
+  .fig-chip { font-size: 10px; color: var(--color-accent-700); margin-top: 3px; }
+  .fig-cell--sage { background: #eef2ec; }
+  .fig-cell--sage .fig-label, .fig-cell--sage .fig-chip { color: #3f5d46; }
+  .fig-cell--sage .fig-value { color: #33513c; }
+
+  /* two-column body */
+  .dossier-cols { display: flex; flex-wrap: wrap; gap: var(--space-6); margin-top: var(--space-6); align-items: start; }
+  .col-main { flex: 1 1 560px; min-width: 0; }
+  .col-rail { flex: 1 1 300px; display: flex; flex-direction: column; gap: var(--space-4); }
+  .sec-head { display: flex; align-items: baseline; gap: 12px; margin: var(--space-6) 0 var(--space-3); }
+  .sec-head--first { margin-top: 0; }
+  .sec-head h4 { margin: 0; }
+  .sec-rule { flex: 1; height: 1px; background: var(--color-divider); align-self: center; }
+  .sec-meta { font-size: 11px; color: var(--color-neutral-600); }
+  .sec-link { font-size: 12px; color: var(--color-accent); text-decoration: none; white-space: nowrap; }
+  .sec-link:hover { text-decoration: underline; }
+
+  /* property abstract */
+  .abstract-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 0 var(--space-6); }
+  .abs-row { display: flex; justify-content: space-between; gap: 12px; padding: 5px 0; border-bottom: 1px solid var(--color-divider); }
+  .abs-k { font-size: 12px; color: var(--color-neutral-600); }
+  .abs-v { font-size: 12.5px; text-align: right; min-width: 0; overflow-wrap: anywhere; }
+
+  /* encumbrance stack + tables */
+  .lien-note { margin: 0 0 var(--space-3); font-size: 12.5px; line-height: 1.55; color: var(--color-neutral-700); }
+  .row-survives { background: #f7ebe7; }
+  .pill-survives {
+    font-family: var(--font-heading); font-weight: var(--font-heading-weight);
+    font-size: 10px; letter-spacing: .05em; text-transform: uppercase;
+    padding: 2px 8px; border-radius: 3px;
+    background: #f2ded8; color: #8a2f22; border: 1px solid #d8b3a9;
+  }
+
+  /* valuation & comparables */
+  .gate-passline { display: flex; align-items: center; gap: 10px; margin-bottom: var(--space-3); font-size: 12.5px; color: var(--color-neutral-800); flex-wrap: wrap; }
+  .gate-passline strong { font-weight: 600; }
+
+  /* underwrite waterfall */
+  .uw-grid { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 300px); gap: var(--space-6); align-items: start; }
+  @media (max-width: 760px) { .uw-grid { grid-template-columns: 1fr; } }
+  .wf-row { display: flex; justify-content: space-between; gap: 12px; padding: 6px 0; border-bottom: 1px solid var(--color-divider); font-size: 13px; }
+  .wf-k { color: var(--color-neutral-700); min-width: 0; }
+  .wf-sub { color: var(--color-neutral-500); }
+  .wf-net { display: flex; justify-content: space-between; padding: 9px 0; font-size: 15px; font-family: var(--font-heading); font-weight: var(--font-heading-weight); }
+  .sage { color: #33513c; }
+  .sens-card { background: var(--color-neutral-100); }
+  .sens-range { font-family: var(--font-heading); font-weight: var(--font-heading-weight); font-size: 22px; }
+  .sens-card p { margin: 0; font-size: 12px; line-height: 1.55; color: var(--color-neutral-700); }
+
+  /* right rail — gate trail */
+  .gt-row { display: flex; justify-content: space-between; align-items: center; gap: 8px; padding: 7px 0; border-bottom: 1px solid var(--color-divider); }
+  .state-pill {
+    font-family: var(--font-heading); font-weight: var(--font-heading-weight);
+    font-size: 10.5px; letter-spacing: .05em; text-transform: uppercase;
+    padding: 2px 9px; border-radius: 3px; white-space: nowrap;
+  }
+  .state-pill--pass { background: #e6ede4; color: #3f5d46; }
+  .state-pill--hitl { background: var(--color-accent-100); color: var(--color-accent-800); }
+  .state-pill--idle { border: 1px solid var(--color-divider); color: var(--color-neutral-600); }
+  .gt-detail { margin: 0 0 var(--space-2); font-size: 11.5px; line-height: 1.45; color: var(--color-neutral-600); }
+  .gt-detail--last { margin-bottom: 0; }
+
+  /* right rail — offer ladder */
+  .ladder-row { display: flex; align-items: center; gap: 8px; margin: 2px 0 var(--space-2); }
+  .rung { flex: 1; text-align: center; min-width: 0; }
+  .rung-k { font-size: 9.5px; letter-spacing: .06em; text-transform: uppercase; color: var(--color-neutral-600); }
+  .rung-k--target { color: var(--color-accent); }
+  .rung-v { font-family: var(--font-heading); font-weight: var(--font-heading-weight); font-size: 16px; }
+  .rung-v--target { color: var(--color-accent-800); }
+  .rung-sep { color: var(--color-neutral-400); }
+  .hr-tight { margin: var(--space-2) 0; }
+  .term-row { display: flex; justify-content: space-between; gap: 8px; font-size: 12px; padding: 3px 0; }
+  .term-k { color: var(--color-neutral-700); }
+  .key-msg {
+    margin: var(--space-2) 0 0; font-size: 12px; line-height: 1.5; font-style: italic;
+    color: var(--color-neutral-700); border-left: 2px solid var(--color-accent-300); padding-left: 10px;
+  }
+  .pending-note { font-size: 10.5px; color: var(--color-neutral-600); text-align: center; margin-top: 2px; }
+
+  /* right rail — risks / compliance / provenance */
+  .risk-list { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 8px; }
+  .risk-li { display: flex; gap: 8px; font-size: 12.5px; line-height: 1.45; }
+  .risk-mark { flex: none; }
+  .mark-accent { color: var(--color-accent); }
+  .mark-muted { color: var(--color-neutral-400); }
+  .check-row { display: flex; gap: 9px; font-size: 12.5px; align-items: flex-start; padding: 3px 0; }
+  .check-box { width: 15px; height: 15px; flex: none; border: 1.5px solid var(--color-divider); border-radius: 3px; margin-top: 2px; }
+  .prov-btn { justify-content: space-between; }
+  .prov-count { color: var(--color-neutral-600); font-size: 12px; }
+  .empty-note { margin: 0; font-size: 13px; color: var(--color-neutral-600); }
+
+  /* ledger modal */
+  .dialog-backdrop[hidden] { display: none; }
+  .dialog-wide { width: min(720px, 100%); }
+  .ledger-sub { font-size: 12px; color: var(--color-neutral-600); }
+  .ledger-scroll { max-height: 56vh; overflow: auto; margin-top: var(--space-2); }
+  .ledger-table { font-size: 12px; }
+</style>
+
+{#- Friendly rendering of a provenance "new value" (may be scalar, bool, number,
+    or a lien dict). -#}
+{% macro ledger_value(v) -%}
+  {%- if v is none -%}&mdash;
+  {%- elif v is mapping -%}added{% if v.get('survives_foreclosure') %} &middot; survives FC{% endif %}
+  {%- elif v is boolean -%}{{ 'Yes' if v else 'No' }}
+  {%- elif v is number -%}{{ "{:,.0f}".format(v) }}
+  {%- elif v is string -%}{% if v | length > 2 and v == v | upper %}{{ v | title }}{% else %}{{ v }}{% endif %}
+  {%- else -%}{{ v }}
+  {%- endif -%}
+{%- endmacro %}
+
+<div class="dossier">
+
+  <!-- masthead -->
+  <div class="masthead">
+    <div style="min-width:0">
+      <div class="kicker num">Parcel {{ parcel_id }} &middot; Foreclosure Notice</div>
+      <h1 class="mast-title num" id="masthead-address">Parcel {{ parcel_id }}</h1>
+      <div class="mast-sub num" id="masthead-sub">County-record dossier &middot; draft for human review</div>
+    </div>
+    <div class="mast-badges">
+      <span class="badge">Stage &middot; {{ badges.stage }}</span>
+      <span class="badge badge-accent">Tier {{ badges.tier }}</span>
+      {% set dt = badges.deal_type | string %}
+      <span class="badge">{% if (dt | upper).startswith('DT-') %}{{ dt[:3] | upper }}{{ dt[3:] | capitalize }}{% else %}{{ dt }}{% endif %}</span>
+      <span class="badge {{ 'badge-pass' if badges.recommendation | lower == 'proceed' else 'badge-accent' }}">{{ badges.recommendation }}</span>
+    </div>
+  </div>
+
+  <!-- verdict strip -->
+  {% set hitl_gates = gates | selectattr('state', 'equalto', 'HITL') | list %}
+  {#- Valuation provenance, parsed from the ARV chip so this screen can never
+      contradict the figure band above it (works for every parcel). -#}
+  {% set chip_parts = (figures.arv_chip or '').split(' · ') %}
+  {% set val_src = chip_parts[0] if chip_parts | length > 0 else '—' %}
+  {% set val_conf = (chip_parts[1] if chip_parts | length > 1 else '') | replace('conf ', '') %}
+  <div class="verdict">
+    <div class="verdict-gates">
+      {% for g in gates %}
+        {% set st = (g.state or '') | lower %}
+        {% if st == 'pass' %}
+          <span class="gate-pill"><svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M20 6 9 17l-5-5"></path></svg> {{ g.name }} &middot; Pass</span>
+        {% elif st == 'hitl' %}
+          <span class="gate-pill gate-pill--hitl"><svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="m21.7 18-8-14a2 2 0 0 0-3.4 0l-8 14A2 2 0 0 0 4 21h16a2 2 0 0 0 1.7-3z"></path><path d="M12 9v4"></path><path d="M12 17h.01"></path></svg> {{ g.name }} &middot; HITL</span>
+        {% else %}
+          <span class="gate-pill gate-pill--idle">{{ g.name }} &middot; {{ g.state or 'Not run' }}</span>
+        {% endif %}
+      {% endfor %}
+    </div>
+    <div class="vrule"></div>
+    <p class="synthesis"><strong>{{ 'One gate needs your call.' if hitl_gates else 'All gates clear.' }}</strong> {{ synthesis }}</p>
+  </div>
+
+  <!-- figures band -->
+  <div class="fig-band">
+    <div class="fig-cell">
+      <div class="fig-label">ARV</div>
+      <div class="fig-value num">{{ figures.arv }}</div>
+      <div class="fig-chip num">{{ figures.arv_chip }}</div>
+    </div>
+    <div class="fig-cell">
+      <div class="fig-label">As-is &middot; CAD</div>
+      <div class="fig-value num">{{ figures.as_is }}</div>
+      <div class="fig-chip num">{{ figures.as_is_chip }}</div>
+    </div>
+    <div class="fig-cell">
+      <div class="fig-label">MAO &middot; 70% rule</div>
+      <div class="fig-value num">{{ figures.mao }}</div>
+      <div class="fig-chip num">{{ figures.mao_chip }}</div>
+    </div>
+    <div class="fig-cell">
+      <div class="fig-label">Equity</div>
+      <div class="fig-value num">{{ figures.equity }}</div>
+    </div>
+    <div class="fig-cell fig-cell--sage">
+      <div class="fig-label">Est. net profit &middot; flip</div>
+      <div class="fig-value num">{{ figures.net_profit }}</div>
+      <div class="fig-chip num">ROI {{ figures.roi }}</div>
+    </div>
+  </div>
+
+  <!-- two-column body -->
+  <div class="dossier-cols">
+
+    <!-- LEFT column -->
+    <div class="col-main">
+
+      <!-- property abstract -->
+      <div class="sec-head sec-head--first">
+        <h4>Property abstract</h4><span class="sec-rule"></span>
+      </div>
+      <div class="abstract-grid">
+        {% for half in [abstract[:6], abstract[6:]] %}
+        <div>
+          {% for label, value in half %}
+          <div class="abs-row"><span class="abs-k">{{ label }}</span><span class="abs-v num">{{ value }}</span></div>
+          {% endfor %}
+        </div>
+        {% endfor %}
+      </div>
+
+      <!-- encumbrance stack -->
+      {% include "partials/lien_stack.html" %}
+
+      <!-- valuation & comparables -->
+      <div class="sec-head">
+        <h4>Valuation &amp; comparables</h4><span class="sec-rule"></span>
+      </div>
+      {% set val_gate = gates | selectattr('name', 'equalto', 'GATE-VAL') | list %}
+      {% if val_gate and val_gate[0].state | lower == 'pass' %}
+      <div class="gate-passline">
+        <span class="gate-pill"><svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M20 6 9 17l-5-5"></path></svg> Gate-Val Pass</span>
+        <span class="num">Confidence {{ val_conf or '&mdash;' }} &ge; floor 85% &middot; source <strong>{{ val_src }}</strong> (tier {{ badges.tier }})</span>
+      </div>
+      {% endif %}
+      {% if comps %}
+      <div class="scroll-x">
+        <table class="table num comp-table">
+          <thead>
+            <tr>
+              <th>Comparable</th>
+              <th class="ta-r" style="width:120px">Sale price</th>
+              <th class="ta-r" style="width:110px">Adjusted</th>
+            </tr>
+          </thead>
+          <tbody>
+            {% for c in comps %}
+            <tr>
+              <td>{{ ((c.address or '').split(',')[0]) | title }}</td>
+              <td class="ta-r">{% if c.sale_price is not none %}${{ "{:,.0f}".format(c.sale_price) }}{% else %}<span class="dash">&mdash;</span>{% endif %}</td>
+              <td class="ta-r">{% if c.adjusted_price is not none %}${{ "{:,.0f}".format(c.adjusted_price) }}{% else %}<span class="dash">&mdash;</span>{% endif %}</td>
+            </tr>
+            {% endfor %}
+          </tbody>
+        </table>
+      </div>
+      {% else %}
+      <p class="empty-note">No comparables recorded yet &mdash; GATE-VAL needs an MLS/appraiser comp pull.</p>
+      {% endif %}
+
+      <!-- underwrite · fix-and-flip -->
+      <div class="sec-head">
+        <h4>Underwrite &middot; fix-and-flip</h4><span class="sec-rule"></span>
+        <a class="sec-link" href="/underwriting">Open in Underwriting &rarr;</a>
+      </div>
+      {#- Sensitivity: recompute the flip net across ARV ±10% × rehab ±20% from
+          the waterfall above (closing scales with ARV). Deterministic. -#}
+      {% set arv_b = waterfall[0][1] %}
+      {% set uw_purchase = -waterfall[1][1] %}
+      {% set rehab_b = -waterfall[2][1] %}
+      {% set hold_c = -waterfall[3][1] %}
+      {% set fin_c = -waterfall[4][1] %}
+      {% set clos_c = -waterfall[5][1] %}
+      {% set ns = namespace(lo=none, hi=none) %}
+      {% for ad in [-0.10, -0.05, 0.0, 0.05, 0.10] -%}
+        {%- for rd in [-0.20, -0.10, 0.0, 0.10, 0.20] -%}
+          {%- set a = arv_b * (1 + ad) -%}
+          {%- set net = a - uw_purchase - rehab_b * (1 + rd) - hold_c - fin_c - (clos_c * a / arv_b) -%}
+          {%- if ns.lo is none or net < ns.lo %}{% set ns.lo = net %}{% endif -%}
+          {%- if ns.hi is none or net > ns.hi %}{% set ns.hi = net %}{% endif -%}
+        {%- endfor -%}
+      {%- endfor %}
+      <div class="uw-grid">
+        <div class="num">
+          {% for label, value in waterfall %}
+          {% set neg = value < 0 %}
+          {% set av = -value if neg else value %}
+          <div class="wf-row">
+            <span class="wf-k">{% if neg %}&minus; {% endif %}{{ label }}</span>
+            <span>{% if neg %}({% endif %}${{ "{:,.0f}".format(av) }}{% if neg %}){% endif %}</span>
+          </div>
+          {% endfor %}
+          <div class="wf-net"><span>Net profit</span><span class="sage">${{ "{:,.0f}".format(net_profit) }}</span></div>
+        </div>
+        <div class="card sens-card">
+          <div class="card-kicker">Sensitivity</div>
+          <div class="num sens-range">{% if ns.lo < 0 %}&minus;${{ "{:.0f}k".format(-ns.lo / 1000) }}{% else %}${{ "{:.0f}k".format(ns.lo / 1000) }}{% endif %} &ndash; {% if ns.hi < 0 %}&minus;${{ "{:.0f}k".format(-ns.hi / 1000) }}{% else %}${{ "{:.0f}k".format(ns.hi / 1000) }}{% endif %}</div>
+          <p>Net profit across ARV &plusmn;10% &times; rehab &plusmn;20%. Base-case margin <span class="num">{{ "{:.1f}".format(net_profit / arv_b * 100) }}%</span>. {% if ns.lo > 0 %}Deal stays positive in every modelled scenario.{% else %}<span class="oxblood">The worst modelled scenario turns negative &mdash; revisit the bid.</span>{% endif %}</p>
+        </div>
+      </div>
+
+    </div>
+
+    <!-- RIGHT rail -->
+    <div class="col-rail">
+
+      <!-- gate trail -->
+      <div class="card">
+        <div class="card-kicker">Gate trail</div>
+        {% for g in gates %}
+        {% set st = (g.state or '') | lower %}
+        <div class="gt-row">
+          <span style="font-size:13px">{{ g.name }}</span>
+          {% if st == 'pass' %}
+            <span class="state-pill state-pill--pass">Pass</span>
+          {% elif st == 'hitl' %}
+            <span class="state-pill state-pill--hitl">HITL</span>
+          {% else %}
+            <span class="state-pill state-pill--idle">{{ g.state or 'Not run' }}</span>
+          {% endif %}
+        </div>
+        {% if g.name == 'GATE-VAL' %}
+        <p class="gt-detail">Confidence {{ val_conf or '&mdash;' }} &ge; floor 85% ({{ val_src }}, tier {{ badges.tier }}).</p>
+        {% elif g.name == 'GATE-LEGAL-LIEN' %}
+        {% set surv = liens | selectattr('survives_foreclosure') | list %}
+        {% if surv %}
+        {% set s0 = surv[0] %}
+        {% set stype = (s0.get('lien_type') or '') | string %}
+        <p class="gt-detail">{{ 'Property-tax' if stype == 'tax' else ((stype[:1] | upper) + stype[1:] if stype else 'Recorded') }} lien (pri. {{ s0.get('priority', '&mdash;') }}) survives foreclosure &mdash; confirm payoff before bid.</p>
+        {% else %}
+        <p class="gt-detail">No recorded lien survives the foreclosure sale.</p>
+        {% endif %}
+        {% else %}
+        <p class="gt-detail gt-detail--last">Fake-signal checks pending human review.</p>
+        {% endif %}
+        {% endfor %}
+      </div>
+
+      <!-- offer ladder -->
+      <div class="card">
+        <div class="card-kicker">Offer ladder &middot; pre-auction</div>
+        <div class="ladder-row num">
+          <div class="rung">
+            <div class="rung-k">Opening</div>
+            <div class="rung-v">${{ "{:,.0f}".format(ladder.opening) }}</div>
+          </div>
+          <span class="rung-sep">&rsaquo;</span>
+          <div class="rung">
+            <div class="rung-k rung-k--target">Target</div>
+            <div class="rung-v rung-v--target">${{ "{:,.0f}".format(ladder.target) }}</div>
+          </div>
+          <span class="rung-sep">&rsaquo;</span>
+          <div class="rung">
+            <div class="rung-k">Walk-away</div>
+            <div class="rung-v">${{ "{:,.0f}".format(ladder.walk_away) }}</div>
+          </div>
+        </div>
+        <hr class="hr hr-tight">
+        <div class="num">
+          <div class="term-row"><span class="term-k">Earnest</span><span>${{ "{:,.0f}".format(ladder.opening * 0.01) }}</span></div>
+          <div class="term-row"><span class="term-k">Option fee &middot; 7-day</span><span>${{ "{:,.0f}".format(ladder.opening * 0.001) }}</span></div>
+          <div class="term-row"><span class="term-k">Closing</span><span>7 days &middot; cash</span></div>
+        </div>
+        <p class="key-msg">&ldquo;The auction is days away. Cash now is better than hoping the property doesn&rsquo;t sell for less than you owe.&rdquo;</p>
+        <a href="/offers" class="btn btn-primary btn-block" style="text-decoration:none">Open draft offer &rarr;</a>
+        <div class="pending-note">Pending &mdash; draft for human review.</div>
+      </div>
+
+      <!-- risk register -->
+      <div class="card">
+        <div class="card-kicker">Risk register</div>
+        {% if risks %}
+        <ul class="risk-list">
+          {% for r in risks %}
+          <li class="risk-li">
+            {% if r.sev == 'high' %}
+            <span class="risk-mark oxblood">†</span>
+            {% elif r.sev == 'medium' %}
+            <span class="risk-mark mark-accent">&middot;</span>
+            {% else %}
+            <span class="risk-mark mark-muted">&middot;</span>
+            {% endif %}
+            <span>{{ r.t }}</span>
+          </li>
+          {% endfor %}
+        </ul>
+        {% else %}
+        <p class="empty-note">No open risks recorded.</p>
+        {% endif %}
+      </div>
+
+      <!-- compliance checklist -->
+      <div class="card">
+        <div class="card-kicker">Compliance checklist</div>
+        <div class="check-row"><span class="check-box"></span><span>Buyer eligibility (Written Statement / RealAuction)</span></div>
+        <div class="check-row"><span class="check-box"></span><span>Gate-Legal-Lien: title / lien priority confirmed</span></div>
+        <div class="check-row"><span class="check-box"></span><span>Legal-Rules version verified</span></div>
+      </div>
+
+      <!-- provenance trigger -->
+      <button class="btn btn-secondary btn-block prov-btn" type="button" onclick="openLedger()">
+        <span>Provenance ledger</span>
+        <span class="num prov-count">{{ ledger | length }} entries &rarr;</span>
+      </button>
+
+    </div>
+  </div>
+</div>
+
+<!-- provenance ledger modal -->
+<div class="dialog-backdrop" id="ledger-backdrop" hidden>
+  <div class="dialog dialog-wide" id="ledger-dialog" role="dialog" aria-modal="true" aria-labelledby="ledger-title">
+    <div style="display:flex;justify-content:space-between;align-items:baseline;gap:var(--space-3)">
+      <div>
+        <div class="dialog-title" id="ledger-title">Provenance ledger</div>
+        <div class="ledger-sub num">Parcel {{ parcel_id }} &middot; append-only &middot; hash-chained</div>
+      </div>
+      <button class="btn btn-ghost" type="button" onclick="closeLedger()">Close</button>
+    </div>
+    <div class="ledger-scroll">
+      <table class="table num ledger-table">
+        <thead>
+          <tr><th>Time</th><th>Field</th><th>New value</th><th>Source</th><th>Hash</th></tr>
+        </thead>
+        <tbody>
+          {% for e in ledger %}
+          <tr{% if e.field_name == 'lien:tax' %} class="row-survives"{% endif %}>
+            <td>{{ (e.timestamp or '') [11:19] or '&mdash;' }}</td>
+            <td>{{ e.field_name }}</td>
+            <td>{{ ledger_value(e.new_value) }}</td>
+            <td>{{ e.source }}</td>
+            <td class="dash">{{ (e.entry_hash or '') [:10] }}</td>
+          </tr>
+          {% endfor %}
+          {% if not ledger %}
+          <tr><td colspan="5" class="dash">No provenance entries recorded.</td></tr>
+          {% endif %}
+        </tbody>
+      </table>
+    </div>
+    <div class="dialog-actions"><button class="btn btn-secondary" type="button" onclick="closeLedger()">Done</button></div>
+  </div>
+</div>
+{% endblock %}
+
+{% block scripts %}
+<script>
+(function () {
+  'use strict';
+
+  /* — Provenance ledger modal — */
+  var backdrop = document.getElementById('ledger-backdrop');
+
+  function openLedger() {
+    if (!backdrop) return;
+    backdrop.hidden = false;
+    var closeBtn = backdrop.querySelector('.btn-ghost');
+    if (closeBtn) closeBtn.focus();
+  }
+
+  function closeLedger() {
+    if (!backdrop) return;
+    backdrop.hidden = true;
+  }
+
+  window.openLedger = openLedger;
+  window.closeLedger = closeLedger;
+
+  if (backdrop) {
+    backdrop.addEventListener('click', function (e) {
+      if (e.target === backdrop) closeLedger(); /* click on the scrim only */
+    });
+  }
+  document.addEventListener('keydown', function (e) {
+    if (e.key === 'Escape') closeLedger();
+  });
+
+  /* — Masthead address hydration (progressive enhancement).
+     The dossier route serves parcel-scoped context only; the flat register
+     carries the situs address, so fill it in when /api/deals answers. — */
+  function smartCase(s) {
+    if (!s || s !== s.toUpperCase()) return s || '';
+    return s.toLowerCase().replace(/(^|[\s\/,(])\S/g, function (m) { return m.toUpperCase(); });
+  }
+
+  try {
+    fetch('/api/deals')
+      .then(function (r) { return r.ok ? r.json() : null; })
+      .then(function (rows) {
+        if (!Array.isArray(rows)) return;
+        var deal = null;
+        for (var i = 0; i < rows.length; i++) {
+          if (String(rows[i].parcel_id) === '{{ parcel_id }}') { deal = rows[i]; break; }
+        }
+        if (!deal) return;
+        var addr = smartCase(deal.address);
+        var h1 = document.getElementById('masthead-address');
+        if (addr && h1) h1.textContent = addr;
+        var sub = document.getElementById('masthead-sub');
+        if (sub && (deal.city || deal.county)) {
+          sub.textContent = smartCase(deal.city || '') + (deal.city && deal.county ? ', ' : '') +
+            smartCase(deal.county || '') + (deal.county ? ' County' : '') +
+            ' \u00b7 county-record dossier \u00b7 draft for human review';
+        }
+      })
+      .catch(function () { /* static fallback already rendered */ });
+  } catch (err) { /* older engines: keep server-rendered fallback */ }
+})();
+</script>
+{% endblock %}

@@ -1,0 +1,42 @@
+{#- Encumbrance stack — one hairline row per recorded lien, newest knowledge of
+    the title chain sorted by recording priority. A dagger marks any lien that
+    survives the foreclosure sale (a direct haircut to the bid ceiling).
+    Context: liens[] dicts {priority, lien_type, recording_date,
+    survives_foreclosure, survives_tax_sale, amount, lender}. -#}
+{% set surviving_fc = liens | selectattr('survives_foreclosure') | list %}
+<div class="sec-head">
+  <h4>Encumbrance stack</h4>
+  <span class="sec-rule"></span>
+  <span class="sec-meta num">{{ liens | length }} liens · {{ surviving_fc | length }} surviving</span>
+</div>
+<p class="lien-note">A <span class="oxblood">†</span> marks a lien that survives the foreclosure sale and must be cleared or paid &mdash; it is a direct haircut to the bid ceiling.</p>
+<div class="scroll-x">
+  <table class="table num lien-table">
+    <thead>
+      <tr>
+        <th style="width:64px">Pri.</th>
+        <th>Instrument</th>
+        <th>Recorded</th>
+        <th class="ta-c" style="width:96px">Survives FC</th>
+        <th class="ta-c" style="width:110px">Survives Tax Sale</th>
+      </tr>
+    </thead>
+    <tbody>
+      {%- for l in liens -%}
+      {%- set fc = l.get('survives_foreclosure') -%}
+      {%- set ts = l.get('survives_tax_sale') -%}
+      {%- set lt = (l.get('lien_type') or '') | string -%}
+      <tr{% if fc %} class="row-survives"{% endif %}>
+        <td{% if fc %} class="oxblood"{% endif %}>{{ l.get('priority', '&mdash;') }}{% if fc %} <span class="oxblood">†</span>{% endif %}</td>
+        <td{% if fc %} class="oxblood"{% endif %}>{% if lt == 'tax' %}Tax lien{% elif lt == 'hoa' %}HOA{% elif lt %}{{ lt[:1] | upper }}{{ lt[1:] }}{% else %}&mdash;{% endif %}</td>
+        <td>{{ l.get('recording_date') or '&mdash;' }}</td>
+        <td class="ta-c">{% if fc %}<span class="pill-survives">Survives</span>{% else %}<span class="dash">&mdash;</span>{% endif %}</td>
+        <td class="ta-c">{% if ts %}Yes{% else %}<span class="dash">&mdash;</span>{% endif %}</td>
+      </tr>
+      {%- endfor -%}
+      {%- if not liens -%}
+      <tr><td colspan="5" class="dash">No liens of record.</td></tr>
+      {%- endif -%}
+    </tbody>
+  </table>
+</div>

@@ -1,0 +1,216 @@
+{% extends "base.html" %}
+
+{% block title %}Pipeline — HERMES REO Diligence Desk{% endblock %}
+
+{% block head_actions %}
+<span class="num pipe-head-meta">Last scrape · Aug 20, 2026</span>
+<button class="btn btn-secondary" type="button">New scrape</button>
+<button class="btn btn-primary" type="button">Run pipeline</button>
+{% endblock %}
+
+{% block body %}
+<style>
+  /* — Pipeline page (II · /deals) — page-scoped styles on the shared tokens — */
+  .pipe { max-width: 1240px; }
+  .num { font-variant-numeric: tabular-nums; }
+  .pipe-head-meta { font-size: 12px; color: var(--color-neutral-500); }
+
+  /* masthead */
+  .pipe-kicker { font-size: 11px; letter-spacing: .12em; text-transform: uppercase; color: var(--color-accent); }
+  .pipe-title { font-size: 40px; line-height: 1.02; margin: var(--space-2) 0 6px; }
+  .pipe-sub { font-size: 14px; color: var(--color-neutral-700); max-width: 60ch; }
+
+  /* KPI band */
+  .kpi-band { margin-top: var(--space-4); display: flex; flex-wrap: wrap;
+    border: 1px solid var(--color-divider); border-radius: var(--radius-md); }
+  .kpi-cell { flex: 1; min-width: 150px; padding: var(--space-3) var(--space-4); }
+  .kpi-cell + .kpi-cell { border-left: 1px solid var(--color-divider); }
+  .kpi-label { font-size: 10px; letter-spacing: .09em; text-transform: uppercase; color: var(--color-neutral-600); }
+  .kpi-value { font-family: var(--font-heading); font-weight: 600; font-size: 27px; line-height: 1.05; margin-top: 4px; }
+  .kpi-hitl { background: var(--color-accent-100); }
+  .kpi-hitl .kpi-label, .kpi-hitl .kpi-value { color: var(--color-accent-800); }
+
+  /* section header */
+  .sec-head { display: flex; align-items: baseline; gap: 12px; margin: var(--space-6) 0 var(--space-3); }
+  .sec-head h4 { margin: 0; }
+  .sec-rule { flex: 1; height: 1px; background: var(--color-divider); }
+
+  /* funnel band */
+  .funnel-band { display: flex; flex-wrap: wrap; border: 1px solid var(--color-divider); border-radius: var(--radius-md); }
+  .funnel-cell { flex: 1; min-width: 150px; padding: var(--space-4); }
+  .funnel-cell + .funnel-cell { border-left: 1px solid var(--color-divider); }
+  .funnel-label { font-size: 10px; letter-spacing: .1em; text-transform: uppercase; color: var(--color-neutral-600); }
+  .funnel-enriched .funnel-label { color: var(--color-accent-800); }
+  .funnel-num { font-family: var(--font-heading); font-weight: 600; font-size: 34px; line-height: 1; margin: 6px 0 3px; }
+  .funnel-cap { font-size: 11px; color: var(--color-neutral-600); }
+  .funnel-priced { background: #eef2ec; }
+  .funnel-priced .funnel-label, .funnel-priced .funnel-cap { color: #3f5d46; }
+  .funnel-priced .funnel-num { color: #33513c; }
+
+  /* bottleneck callout */
+  .pipe-callout { margin-top: var(--space-2); border-left: 2px solid var(--color-accent);
+    padding: 8px 0 8px 12px; font-size: 12.5px; line-height: 1.5; color: var(--color-neutral-800); }
+  .pipe-callout strong { font-family: var(--font-heading); font-weight: 600; }
+
+  /* toolbar */
+  .pipe-toolbar { display: flex; flex-wrap: wrap; gap: var(--space-3); align-items: center;
+    margin: var(--space-6) 0 var(--space-3); }
+  .tool-label { font-size: 10px; letter-spacing: .09em; text-transform: uppercase; color: var(--color-neutral-600); }
+  .segrow { display: flex; gap: 6px; flex-wrap: wrap; }
+  .segbtn { padding: 5px 12px; font-size: 12px; font-family: var(--font-heading); font-weight: 400;
+    border: 1px solid var(--color-divider); color: var(--color-neutral-700); background: transparent;
+    border-radius: 4px; cursor: pointer; }
+  .segbtn:hover { border-color: color-mix(in srgb, var(--color-text) 40%, transparent); }
+  .segbtn.active { border-color: var(--color-accent); color: var(--color-accent);
+    background: color-mix(in srgb, var(--color-accent) 10%, transparent); font-weight: 600; }
+  .vdivider { width: 1px; height: 24px; background: var(--color-divider); margin: 0 4px; }
+  .tool-spacer { flex: 1; }
+  .tool-input { width: 230px; }
+  .shown-count { font-size: 12px; color: var(--color-neutral-600); }
+
+  /* register table */
+  .table-wrap { overflow-x: auto; border-top: 1px solid var(--color-divider); }
+  .register { min-width: 1040px; }
+  .register th, .register td { padding: 5px 10px; }
+  .register th { white-space: nowrap; }
+  .register th.sortable { cursor: pointer; user-select: none; }
+  .register th.sortable:hover { color: var(--color-accent); }
+  .sort-mark { display: inline-block; min-width: 1ch; margin-left: 2px; color: var(--color-accent); }
+  .register th.th-right { text-align: right; }
+  .register th.th-center { text-align: center; }
+  .c-num { text-align: right; white-space: nowrap; }
+  .c-gates { white-space: nowrap; }
+  .cell-sub { font-size: 10px; color: var(--color-neutral-500); }
+  .c-owner { font-size: 12px; color: var(--color-neutral-700); }
+  .prop-link { color: inherit; text-decoration: none; }
+  .prop-link:hover { color: var(--color-accent); text-decoration: underline; text-underline-offset: 3px; }
+  tr.reg-row { cursor: pointer; }
+  tr.reg-row:focus-visible { outline: 2px solid var(--color-accent); outline-offset: -2px; }
+
+  /* stage + tier pills */
+  .pill { display: inline-block; padding: 2px 8px; border-radius: 3px; font-family: var(--font-heading);
+    font-weight: 600; font-size: 9.5px; letter-spacing: .05em; text-transform: uppercase; }
+  .stage-inbox { background: var(--color-neutral-200); color: var(--color-neutral-800); }
+  .stage-enriched { background: var(--color-accent-100); color: var(--color-accent-800); }
+  .stage-valued { background: var(--color-accent-200); color: var(--color-accent-900); }
+  .stage-priced { background: #e6ede4; color: #33513c; }
+  .tier-t3 { background: var(--color-accent-100); color: var(--color-accent-800); }
+  .tier-plain { font-size: 11px; color: var(--color-neutral-600); }
+
+  /* gates marks */
+  .gate-marks { display: flex; gap: 10px; font-size: 10.5px; }
+  .gate-pass { color: #3f5d46; }
+  .gate-fail { color: #8a2f22; }
+
+  .mut { color: var(--color-neutral-400); }
+  .empty-row td { text-align: center; color: var(--color-neutral-600); font-size: 13px; padding: var(--space-4); }
+  .reg-foot { margin: var(--space-3) 0 0; font-size: 11.5px; color: var(--color-neutral-600); }
+</style>
+
+<div class="pipe">
+  <!-- masthead -->
+  <div class="pipe-kicker">The docket · Collin &amp; Dallas County</div>
+  <h1 class="pipe-title">Pipeline</h1>
+  <p class="pipe-sub">Every foreclosure and tax-deed notice the fleet has sourced, tracked from raw notice through to a priced offer. Color marks risk; the funnel below shows where the work is stuck.</p>
+
+  <!-- KPI band -->
+  <div class="kpi-band">
+    <div class="kpi-cell">
+      <div class="kpi-label">Active leads</div>
+      <div class="kpi-value num">{{ kpis.leads }}</div>
+    </div>
+    <div class="kpi-cell">
+      <div class="kpi-label">Portfolio value · CAD</div>
+      <div class="kpi-value num">{{ kpis.value }}</div>
+    </div>
+    <div class="kpi-cell">
+      <div class="kpi-label">Debt exposure</div>
+      <div class="kpi-value num">{{ kpis.debt }}</div>
+    </div>
+    <div class="kpi-cell kpi-hitl">
+      <div class="kpi-label">Needs your review · HITL</div>
+      <div class="kpi-value num">{{ kpis.hitl }}</div>
+    </div>
+  </div>
+
+  <!-- stage funnel -->
+  <div class="sec-head"><h4>The funnel</h4><span class="sec-rule"></span></div>
+  <div class="funnel-band">
+    <div class="funnel-cell funnel-inbox">
+      <div class="funnel-label">1 · Inbox</div>
+      <div class="funnel-num num">{{ funnel[0][1] }}</div>
+      <div class="funnel-cap">Raw notices, not yet enriched</div>
+    </div>
+    <div class="funnel-cell funnel-enriched">
+      <div class="funnel-label">2 · Enriched</div>
+      <div class="funnel-num num">{{ funnel[1][1] }}</div>
+      <div class="funnel-cap">36-field record + lien stack</div>
+    </div>
+    <div class="funnel-cell funnel-valued">
+      <div class="funnel-label">3 · Valued</div>
+      <div class="funnel-num num">{{ funnel[2][1] }}</div>
+      <div class="funnel-cap">GATE-VAL passed on real comps</div>
+    </div>
+    <div class="funnel-cell funnel-priced">
+      <div class="funnel-label">4 · Priced</div>
+      <div class="funnel-num num">{{ funnel[3][1] }}</div>
+      <div class="funnel-cap">MAO, ladder &amp; draft offer</div>
+    </div>
+  </div>
+  <div class="pipe-callout"><strong>The bottleneck.</strong> {{ rows|length }} of {{ rows|length }} leads flagged HITL — Texas is a non-disclosure state, so every deal needs a human MLS/appraiser comp pull before GATE-VAL can pass and it can move to Valued. That is the one repeatable action that clears this queue.</div>
+
+  <!-- toolbar -->
+  <div class="pipe-toolbar">
+    <span class="tool-label">County</span>
+    <div class="segrow" role="group" aria-label="Filter by county" data-filter-group="county">
+      <button type="button" class="segbtn active" data-county="All" aria-pressed="true">All</button>
+      <button type="button" class="segbtn" data-county="Collin" aria-pressed="false">Collin</button>
+      <button type="button" class="segbtn" data-county="Dallas" aria-pressed="false">Dallas</button>
+    </div>
+    <span class="vdivider" aria-hidden="true"></span>
+    <span class="tool-label">Stage</span>
+    <div class="segrow" role="group" aria-label="Filter by stage" data-filter-group="stage">
+      <button type="button" class="segbtn active" data-stage="All" aria-pressed="true">All</button>
+      <button type="button" class="segbtn" data-stage="Inbox" aria-pressed="false">Inbox</button>
+      <button type="button" class="segbtn" data-stage="Enriched" aria-pressed="false">Enriched</button>
+      <button type="button" class="segbtn" data-stage="Valued" aria-pressed="false">Valued</button>
+      <button type="button" class="segbtn" data-stage="Priced" aria-pressed="false">Priced</button>
+    </div>
+    <span class="tool-spacer"></span>
+    <input class="input tool-input" id="pipeQuery" type="text" placeholder="Filter address, owner, parcel…"
+           autocomplete="off" aria-label="Filter register by address, owner, or parcel">
+    <span class="shown-count num" id="shownCount">{{ rows|length }} of {{ rows|length }} shown</span>
+  </div>
+
+  <!-- register -->
+  <div class="table-wrap">
+    <table class="table num register" id="registerTable">
+      <thead>
+        <tr>
+          <th class="sortable" tabindex="0" data-sort-key="stage" scope="col">Stage<span class="sort-mark" aria-hidden="true"></span></th>
+          <th class="sortable" tabindex="0" data-sort-key="addr" scope="col">Property<span class="sort-mark" aria-hidden="true"></span></th>
+          <th class="sortable" tabindex="0" data-sort-key="county" scope="col">County<span class="sort-mark" aria-hidden="true"></span></th>
+          <th class="sortable" tabindex="0" data-sort-key="owner" scope="col">Owner<span class="sort-mark" aria-hidden="true"></span></th>
+          <th class="sortable th-right" data-sort-key="sqft" scope="col">Sqft<span class="sort-mark" aria-hidden="true"></span></th>
+          <th class="sortable th-right" data-sort-key="cad" scope="col">CAD value<span class="sort-mark" aria-hidden="true"></span></th>
+          <th class="sortable th-right" data-sort-key="debt" scope="col">Debt<span class="sort-mark" aria-hidden="true"></span></th>
+          <th class="sortable th-right" data-sort-key="eq" scope="col">Equity<span class="sort-mark" aria-hidden="true"></span></th>
+          <th class="sortable th-right" data-sort-key="ltv" scope="col">LTV<span class="sort-mark" aria-hidden="true"></span></th>
+          <th class="sortable th-right" data-sort-key="mao" scope="col">Prelim MAO<span class="sort-mark" aria-hidden="true"></span></th>
+          <th class="sortable th-center" data-sort-key="tier" scope="col">Tier<span class="sort-mark" aria-hidden="true"></span></th>
+          <th scope="col">Gates</th>
+        </tr>
+      </thead>
+      <tbody id="registerBody">
+        {% for r in rows %}{% include "partials/deal_row.html" %}{% endfor %}
+        <tr id="emptyRow" class="empty-row" hidden><td colspan="12">No leads match the current filters.</td></tr>
+      </tbody>
+    </table>
+  </div>
+  <p class="reg-foot">Working register · {{ rows|length }} most recent of {{ kpis.leads }} leads · click any row to open its dossier. † in a dossier marks a lien that survives foreclosure.</p>
+</div>
+{% endblock %}
+
+{% block scripts %}
+<script src="/static/app-pipeline.js" defer></script>
+{% endblock %}

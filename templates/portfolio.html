@@ -1,0 +1,260 @@
+{% extends "base.html" %}
+{% block title %}Portfolio · HERMES — REO Diligence Desk{% endblock %}
+
+{% block head_actions %}
+<a class="btn btn-primary" href="/deals" style="text-decoration:none">Open pipeline</a>
+{% endblock %}
+
+{% block body %}
+{# Shell layout (.app/.sidebar/.running-head) + shared composition live in
+   desk-pages.css, loaded per-page like system/offers do. This file adds only
+   portfolio-scoped classes on top of the classical.css token system. #}
+<link rel="stylesheet" href="/static/desk-pages.css">
+
+<style>
+  /* — Portfolio page layer (tokens from classical.css; semantic risk constants
+       per handoff: pass #3f5d46/#7ea076, fail #8a2f22/#c98a7d, caution #c9a24c) — */
+  :root { --pf-pass:#7ea076; --pf-fail:#c98a7d; --pf-caution:#c9a24c;
+          --pf-pass-text:#3f5d46; --pf-pass-strong:#33513c; --pf-fail-text:#8a2f22; }
+
+  /* KPI band — HITL cell is the one accent-tinted cell */
+  .kpi--hitl { background: var(--color-accent-100); }
+  .kpi--hitl .kpi-label, .kpi--hitl .kpi-value { color: var(--color-accent-800); }
+
+  /* Panel grid — two rows of bordered cards */
+  .pf-row { display:flex; flex-wrap:wrap; gap:var(--space-4); align-items:stretch; }
+  .pf-row-first { margin-top:var(--space-6); }
+  .pf-row + .pf-row { margin-top:var(--space-4); }
+  .pf-panel { flex:1 1 300px; min-width:0; border:1px solid var(--color-divider);
+              border-radius:var(--radius-md); padding:var(--space-4); }
+  .pf-panel-title { margin-bottom:var(--space-3); }
+
+  /* Horizontal bar lists (funnel · counties · cities) */
+  .pf-bars { display:flex; flex-direction:column; gap:10px; }
+  .pf-cities .pf-bars { gap:8px; }
+  .pf-bar-row { display:flex; align-items:center; gap:10px; }
+  .pf-bar-label { font-size:12px; color:var(--color-neutral-700); flex:none; width:74px; }
+  .pf-cities .pf-bar-label { width:96px; }
+  .pf-bar-track { flex:1; height:12px; background:var(--color-neutral-200);
+                  border-radius:var(--radius-sm); overflow:hidden; }
+  .pf-cities .pf-bar-track { height:10px; }
+  .pf-bar-fill { height:100%; border-radius:var(--radius-sm); }
+  .pf-bar-count { width:32px; text-align:right; font-size:12px; flex:none; }
+  .pf-cities .pf-bar-count { width:26px; }
+
+  /* Tier stat blocks under the county bars */
+  .pf-tier-row { display:flex; gap:var(--space-4); }
+  .pf-tier-label { font-size:10px; letter-spacing:.08em; text-transform:uppercase;
+                   color:var(--color-neutral-600); }
+  .pf-tier-value { font-family:var(--font-heading); font-weight:600;
+                   font-size:22px; line-height:1.2; }
+
+  /* Split bars (risk gates · value vs debt) */
+  .pf-split-caption { font-size:11px; color:var(--color-neutral-600); margin-bottom:4px; }
+  .pf-split { display:flex; height:14px; border-radius:var(--radius-sm);
+              overflow:hidden; margin-bottom:6px; }
+  .pf-split-legend { display:flex; justify-content:space-between; font-size:11.5px;
+                     color:var(--color-neutral-700); }
+  .pf-vd { display:flex; flex-direction:column; gap:12px; }
+  .pf-vd-caption { display:flex; justify-content:space-between; font-size:12px; margin-bottom:4px; }
+  .pf-vd-name { color:var(--color-neutral-700); }
+
+  /* Ranked lender list */
+  .pf-lenders { display:flex; flex-direction:column; gap:7px; font-size:12.5px; }
+  .pf-lender { display:flex; justify-content:space-between; gap:12px;
+               border-bottom:1px solid var(--color-divider); padding-bottom:5px; }
+  .pf-lender:last-child { border-bottom:0; padding-bottom:0; }
+  .pf-lender span:last-child { text-align:right; }
+
+  /* Footer link-cards */
+  .pf-links { display:flex; flex-wrap:wrap; gap:var(--space-4);
+              margin-top:var(--space-4); max-width:1240px; }
+  .pf-link-card { flex:1 1 300px; min-width:0; text-decoration:none; color:inherit;
+                  border:1px solid var(--color-divider); border-radius:var(--radius-md);
+                  padding:var(--space-4); display:flex; justify-content:space-between;
+                  align-items:center; gap:var(--space-3); }
+  .pf-link-card:hover { border-color:var(--color-accent); }
+  .pf-link-sub { font-size:14px; margin-top:4px; }
+  .pf-arrow { color:var(--color-accent); font-size:18px; flex:none; }
+  .pf-link-card--accent { border-color:var(--color-accent-300); background:var(--color-accent-100); }
+  .pf-link-card--accent:hover { border-color:var(--color-accent); }
+  .pf-link-card--accent .card-kicker,
+  .pf-link-card--accent .pf-link-sub,
+  .pf-link-card--accent .pf-arrow { color:var(--color-accent-800); }
+</style>
+
+<div class="page-max">
+  {# ── Masthead ──────────────────────────────────────────────────────── #}
+  <div class="mast-kicker">PORTFOLIO</div>
+  <h1 class="mast-h1">The book, at a glance</h1>
+  <p class="mast-sub">Everything the fleet is holding across two counties — value, debt, where each deal sits in the funnel, and the risk gates it has cleared.</p>
+
+  {# ── KPI band ──────────────────────────────────────────────────────── #}
+  <div class="kpis">
+    <div class="kpi">
+      <div class="kpi-label">Active leads</div>
+      <div class="kpi-value num">{{ kpis.active_leads }}</div>
+    </div>
+    <div class="kpi">
+      <div class="kpi-label">Portfolio value · CAD</div>
+      <div class="kpi-value num">{{ kpis.portfolio_cad }}</div>
+    </div>
+    <div class="kpi">
+      <div class="kpi-label">Debt exposure</div>
+      <div class="kpi-value num">{{ kpis.debt_exposure }}</div>
+    </div>
+    <div class="kpi">
+      <div class="kpi-label">Median value</div>
+      <div class="kpi-value num">{{ kpis.median_value }}</div>
+    </div>
+    <div class="kpi kpi--hitl">
+      <div class="kpi-label">Needs review · HITL</div>
+      <div class="kpi-value num">{{ kpis.hitl }}</div>
+    </div>
+  </div>
+
+  {# ── Panels row 1 ──────────────────────────────────────────────────── #}
+  <div class="pf-row pf-row-first">
+
+    <!-- Pipeline funnel -->
+    <section class="pf-panel" aria-label="Pipeline funnel">
+      <div class="card-kicker pf-panel-title">Pipeline funnel</div>
+      {% set fmax = funnel | map(attribute='1') | max if funnel else 0 %}
+      <div class="pf-bars">
+        {% for label, count in funnel %}
+        <div class="pf-bar-row">
+          <span class="pf-bar-label"{% if loop.last %} style="color:var(--pf-pass-text)"{% endif %}>{{ label }}</span>
+          <div class="pf-bar-track" role="img" aria-label="{{ label }}: {{ count }}">
+            <div class="pf-bar-fill" style="width:{{ ((count / fmax * 100) | round(1)) if fmax else 0 }}%;background:{% if loop.last %}var(--pf-pass){% elif loop.first %}var(--color-neutral-400){% else %}var(--color-accent-300){% endif %}"></div>
+          </div>
+          <span class="pf-bar-count num"{% if loop.last %} style="color:var(--pf-pass-strong)"{% endif %}>{{ count }}</span>
+        </div>
+        {% endfor %}
+      </div>
+    </section>
+
+    <!-- County & tier -->
+    <section class="pf-panel" aria-label="County and tier">
+      <div class="card-kicker pf-panel-title">County &amp; tier</div>
+      {% set cmax = counties | map(attribute='1') | max if counties else 0 %}
+      <div class="pf-bars">
+        {% for name, count in counties %}
+        <div class="pf-bar-row">
+          <span class="pf-bar-label">{{ name }}</span>
+          <div class="pf-bar-track" role="img" aria-label="{{ name }}: {{ count }}">
+            <div class="pf-bar-fill" style="width:{{ ((count / cmax * 100) | round(1)) if cmax else 0 }}%;background:{% if loop.first %}var(--color-neutral-400){% else %}var(--color-accent-400){% endif %}"></div>
+          </div>
+          <span class="pf-bar-count num">{{ count }}</span>
+        </div>
+        {% endfor %}
+      </div>
+      <hr class="hr" style="margin:var(--space-3) 0">
+      <div class="pf-tier-row">
+        {# hot tiers first (T3 above T0), matching the reference composition #}
+        {% for tier, count in tiers | sort(attribute='0', reverse=true) %}
+        <div>
+          <div class="pf-tier-label">Tier {{ tier }}{% if tier == 'T3' %} · hot{% elif tier == 'T0' %} · cold{% endif %}</div>
+          <div class="pf-tier-value num">{{ count }}</div>
+        </div>
+        {% endfor %}
+      </div>
+    </section>
+
+    <!-- Risk gates -->
+    <section class="pf-panel" aria-label="Risk gates">
+      <div class="card-kicker pf-panel-title">Risk gates</div>
+      {% set lien_total = risk_gates.lien_pass + risk_gates.lien_fail %}
+      {% set val_total = risk_gates.val_clear + risk_gates.val_rejected %}
+      <div class="pf-split-caption">Lien gate</div>
+      <div class="pf-split" role="img" aria-label="Lien gate: {{ risk_gates.lien_pass }} pass, {{ risk_gates.lien_fail }} fail">
+        <div style="width:{{ ((risk_gates.lien_pass / lien_total * 100) | round(1)) if lien_total else 0 }}%;background:var(--pf-pass)"></div>
+        <div style="flex:1;background:var(--pf-fail)"></div>
+      </div>
+      <div class="pf-split-legend num">
+        <span style="color:var(--pf-pass-text)">{{ risk_gates.lien_pass }} pass</span>
+        <span style="color:var(--pf-fail-text)">{{ risk_gates.lien_fail }} fail</span>
+      </div>
+      <div class="pf-split-caption" style="margin-top:var(--space-3)">Valuation gate</div>
+      <div class="pf-split" role="img" aria-label="Valuation gate: {{ risk_gates.val_clear }} clear, {{ risk_gates.val_rejected }} rejected">
+        <div style="width:{{ ((risk_gates.val_clear / val_total * 100) | round(1)) if val_total else 0 }}%;background:var(--pf-pass)"></div>
+        <div style="flex:1;background:var(--pf-caution)"></div>
+      </div>
+      <div class="pf-split-legend num">
+        <span style="color:var(--pf-pass-text)">{{ risk_gates.val_clear }} clear</span>
+        <span style="color:var(--color-accent-800)">{{ risk_gates.val_rejected }} rejected</span>
+      </div>
+    </section>
+  </div>
+
+  {# ── Panels row 2 ──────────────────────────────────────────────────── #}
+  <div class="pf-row">
+
+    <!-- Value against debt -->
+    <section class="pf-panel" aria-label="Value against debt">
+      <div class="card-kicker pf-panel-title">Value against debt</div>
+      {% set vd_cad = value_debt.cad | replace('$', '') | replace('M', '') | float %}
+      {% set vd_debt = value_debt.debt | replace('$', '') | replace('M', '') | float %}
+      {% set vd_equity = value_debt.equity | replace('$', '') | replace('M', '') | float %}
+      <div class="pf-vd">
+        <div>
+          <div class="pf-vd-caption num"><span class="pf-vd-name">CAD value</span><span>{{ value_debt.cad }}</span></div>
+          <div class="pf-split" style="margin-bottom:0"><div style="width:100%;background:var(--color-accent-300)"></div></div>
+        </div>
+        <div>
+          <div class="pf-vd-caption num"><span class="pf-vd-name">Mortgage debt</span><span>{{ value_debt.debt }}</span></div>
+          <div class="pf-split" style="margin-bottom:0"><div style="width:{{ ((vd_debt / vd_cad * 100) | round(1)) if vd_cad else 0 }}%;background:var(--color-neutral-500)"></div></div>
+        </div>
+        <div>
+          <div class="pf-vd-caption num"><span class="pf-vd-name" style="color:var(--pf-pass-text)">Gross equity</span><span style="color:var(--pf-pass-strong)">{{ value_debt.equity }}</span></div>
+          <div class="pf-split" style="margin-bottom:0"><div style="width:{{ ((vd_equity / vd_cad * 100) | round(1)) if vd_cad else 0 }}%;background:var(--pf-pass)"></div></div>
+        </div>
+      </div>
+    </section>
+
+    <!-- Foreclosing lenders -->
+    <section class="pf-panel" aria-label="Foreclosing lenders">
+      <div class="card-kicker pf-panel-title">Foreclosing lenders</div>
+      <div class="pf-lenders num">
+        {% for name, count in lenders %}
+        <div class="pf-lender"><span>{{ name }}</span><span>{{ count }}</span></div>
+        {% endfor %}
+      </div>
+    </section>
+
+    <!-- Cities top 8 -->
+    <section class="pf-panel pf-cities" aria-label="Top cities">
+      <div class="card-kicker pf-panel-title">Cities · top 8</div>
+      {% set citymax = cities | map(attribute='1') | max if cities else 0 %}
+      <div class="pf-bars">
+        {% for name, count in cities %}
+        <div class="pf-bar-row">
+          <span class="pf-bar-label">{{ name }}</span>
+          <div class="pf-bar-track" role="img" aria-label="{{ name }}: {{ count }}">
+            <div class="pf-bar-fill" style="width:{{ ((count / citymax * 100) | round(1)) if citymax else 0 }}%;background:var(--color-accent-300)"></div>
+          </div>
+          <span class="pf-bar-count num">{{ count }}</span>
+        </div>
+        {% endfor %}
+      </div>
+    </section>
+  </div>
+
+  {# ── Footer link-cards ─────────────────────────────────────────────── #}
+  <div class="pf-links">
+    <a class="pf-link-card" href="/map">
+      <span>
+        <span class="card-kicker">Geographic spread</span>
+        <div class="pf-link-sub">{{ mapped_count }} leads mapped across DFW</div>
+      </span>
+      <span class="pf-arrow">→</span>
+    </a>
+    <a class="pf-link-card pf-link-card--accent" href="/deals">
+      <span>
+        <span class="card-kicker">Clear the backlog</span>
+        <div class="pf-link-sub">{{ kpis.hitl }} leads waiting on a comp pull</div>
+      </span>
+      <span class="pf-arrow">→</span>
+    </a>
+  </div>
+</div>
+{% endblock %}

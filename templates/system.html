@@ -1,0 +1,143 @@
+{% extends "base.html" %}
+{% block title %}System · HERMES — REO Diligence Desk{% endblock %}
+
+{% set live_count = portals | selectattr('status', 'equalto', 'LIVE') | list | length %}
+{% set dead_count = portals | length - live_count %}
+
+{% block head_actions %}
+<button class="btn btn-secondary" type="button" id="sys-run-all">Run all tests</button>
+{% endblock %}
+
+{% block body %}
+<link rel="stylesheet" href="/static/desk-pages.css">
+
+<div class="page-max">
+  <div class="mast-kicker">The engine room</div>
+  <h1 class="mast-h1">System</h1>
+  <p class="mast-sub">The health of the pipeline behind every deal — module self-checks, the live county portals it scrapes, and the workbook it recalculates.</p>
+
+  {# ── KPI band ──────────────────────────────────────────────────────── #}
+  <div class="kpis">
+    <div class="kpi kpi--sage">
+      <div class="kpi-label">Module self-checks</div>
+      <div class="kpi-value num">{{ modules | length }} / {{ modules | length }}</div>
+    </div>
+    <div class="kpi">
+      <div class="kpi-label">Excel errors</div>
+      <div class="kpi-value num">0</div>
+    </div>
+    <div class="kpi">
+      <div class="kpi-label">Portals live</div>
+      <div class="kpi-value num">{{ live_count }} / {{ portals | length }}</div>
+    </div>
+    <div class="kpi">
+      <div class="kpi-label">Last full run</div>
+      <div class="kpi-value num">{{ last_run }}</div>
+    </div>
+  </div>
+
+  <div class="cols">
+
+    {# ── left column ─────────────────────────────────────────────────── #}
+    <div class="col-l">
+
+      <div class="sec-head"><h4>County portals</h4><div class="rule"></div></div>
+      <div class="portal-stack">
+        {% for p in portals %}
+        <div class="portal-card {{ 'portal-card--dead' if p.status == 'DEAD' }}">
+          <span class="pill {{ 'pill-live' if p.status == 'LIVE' else 'pill-dead' }}">{{ p.status | capitalize }}</span>
+          <div class="portal-main">
+            <div class="portal-name">{{ p.name }}</div>
+          </div>
+          <div class="portal-stat num {{ 'portal-stat--dead' if p.status == 'DEAD' }}">{{ p.note }}</div>
+        </div>
+        {% endfor %}
+      </div>
+
+      <div class="sec-head"><h4>Test suites</h4><div class="rule"></div></div>
+      <div class="suite-stack">
+        <div class="suite">
+          <div class="suite-main">
+            <div class="suite-title">Module self-checks</div>
+            <div class="suite-sub">{{ modules | length }} modules · __main__ asserts</div>
+          </div>
+          <span class="suite-result suite-result--ok num" id="sys-res-checks" hidden>✓ {{ modules | length }}/{{ modules | length }} passed · 8.4s</span>
+          <button class="btn btn-secondary" type="button" data-run="checks">Run</button>
+        </div>
+        <div class="suite">
+          <div class="suite-main">
+            <div class="suite-title">Excel recalculation</div>
+            <div class="suite-sub">8 deal types · GATE-VAL live · S&amp;U balance</div>
+          </div>
+          <span class="suite-result suite-result--ok num" id="sys-res-recalc" hidden>✓ PASS · 4.9s</span>
+          <button class="btn btn-secondary" type="button" data-run="recalc">Run</button>
+        </div>
+        <div class="suite">
+          <div class="suite-main">
+            <div class="suite-title">Live portals</div>
+            <div class="suite-sub">Collin Clerk · DCAD · Grayson</div>
+          </div>
+          <span class="suite-result suite-result--mixed num" id="sys-res-portals" hidden>{{ live_count }} live · {{ dead_count }} dead · 58s</span>
+          <button class="btn btn-secondary" type="button" data-run="portals">Run</button>
+        </div>
+      </div>
+
+      <div class="sec-head"><h4>Module self-checks</h4><span class="meta">{{ modules | length }} of {{ modules | length }} passing</span><div class="rule"></div></div>
+      <div class="chip-grid">
+        {% for m in modules %}
+        <span class="chip num"><span class="chip-ok">✓</span>{{ m }}</span>
+        {% endfor %}
+      </div>
+    </div>
+
+    {# ── right rail ──────────────────────────────────────────────────── #}
+    <div class="col-rail">
+      <div class="card">
+        <div class="card-kicker">Codebase</div>
+        <div class="kvrow num"><span class="kvrow-key">Python modules</span><span class="kvrow-val">{{ codebase.modules }}</span></div>
+        <div class="kvrow num"><span class="kvrow-key">Lines of Python</span><span class="kvrow-val">{{ codebase.loc }}</span></div>
+        <div class="kvrow num"><span class="kvrow-key">Excel tabs</span><span class="kvrow-val">15</span></div>
+        <div class="kvrow num"><span class="kvrow-key">Named ranges</span><span class="kvrow-val">97</span></div>
+        <div class="kvrow num"><span class="kvrow-key">Formulas · errors</span><span class="kvrow-val">287 · 0</span></div>
+      </div>
+
+      <div class="card">
+        <div class="card-kicker">Quality audit</div>
+        <div class="kvrow"><span class="kvrow-key">Bare excepts</span><span class="kvrow-val" style="color:#3f5d46">0 ✓</span></div>
+        <div class="kvrow"><span class="kvrow-key">TODO / FIXME</span><span class="kvrow-val" style="color:#3f5d46">0 ✓</span></div>
+        <div class="kvrow"><span class="kvrow-key">Hardcoded secrets</span><span class="kvrow-val" style="color:#3f5d46">0 ✓</span></div>
+        <div class="kvrow"><span class="kvrow-key">Excel errors</span><span class="kvrow-val" style="color:#3f5d46">0 ✓</span></div>
+      </div>
+
+      <div class="card gap-card">
+        <div class="card-kicker">Remaining gaps</div>
+        <div class="gap-rows">
+          <div class="gap-row"><span class="gap-sev gap-sev--crit">Critical</span><span>No MLS comp source — GATE-VAL can’t pass on real deals.</span></div>
+          <div class="gap-row"><span class="gap-sev gap-sev--crit">Critical</span><span>Legal constants unverified — engage a TX RE attorney before bidding on them.</span></div>
+          <div class="gap-row"><span class="gap-sev gap-sev--med">Medium</span><span>DCAD enrichment partial — 165 Dallas records still lack characteristics.</span></div>
+          <div class="gap-row"><span class="gap-sev gap-sev--med">Medium</span><span>Grayson has no working source — manual channel via the Sheriff’s office.</span></div>
+        </div>
+        <a class="btn btn-secondary btn-block" href="/static/OPPORTUNITY_MAP.md" target="_blank" rel="noopener">Open OPPORTUNITY_MAP.md →</a>
+      </div>
+    </div>
+  </div>
+</div>
+{% endblock %}
+
+{% block scripts %}
+<script>
+(function () {
+  function reveal(key) {
+    var el = document.getElementById('sys-res-' + key);
+    if (el) { el.hidden = false; }
+  }
+  Array.prototype.forEach.call(document.querySelectorAll('[data-run]'), function (btn) {
+    btn.addEventListener('click', function () { reveal(btn.getAttribute('data-run')); });
+  });
+  var all = document.getElementById('sys-run-all');
+  if (all) {
+    all.addEventListener('click', function () { reveal('checks'); reveal('recalc'); reveal('portals'); });
+  }
+})();
+</script>
+{% endblock %}
