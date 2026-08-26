@@ -270,3 +270,10 @@ Timezone-aware provenance timestamps (6 sites); M6 deal-type-aware lien-survival
 - **CI caught real drift immediately**: fastapi/uvicorn missing from requirements (worked locally, broke remotely), plus two environment-portability assumptions in tests (hardcoded .venv path; data/-dependent assertions). All fixed; pipeline green: lint → 171 tests → self-checks → fixture → workbook build in ~25s.
 - **Geocode harvest**: address normalization flipped Census success from ~4% to ~90%+ per batch → **115/338 records geocoded** (0 at session start); negative-cache ledger holds 9 repeat-offenders; batches now terminate when only stragglers remain.
 - **Map artifact refreshed**: live_foreclosures.geojson 30 features, all with real coordinates.
+
+---
+
+# WAVE 1 EXECUTED — Aug 26, 2026 (18 of 43 opportunities)
+F1 HITL loop closure (end-to-end verified: comps→GATE-VAL pass→$138K profit→$402K offer) · RL1-RL3 adapter fail-fast/quarantine/shape-markers · RL4 run summaries + EXIT_CODES · RL5 weekly live smoke job · RL9 DCAD yield probe · RL10 file locking · RL11 census cache unify · F5-lite batch_price+CSV · F6 complete underwriting router (all 11 deal-type keys) · F7 coordinate leak fixed (119 features) · F9 digest wired · F10 grayson dispatch · F11 market analytics endpoint · FN3 cad_2025 root cause + defenses · FN4-lite address columns · FN5 money-path contracts pinned (132 tests) · FN6 coverage ratchet (55% vs 36 floor) · FN4 columns.
+**Suite: 487 tests green (was 171). Coverage 55%. CI ✓ on push.**
+**Remaining:** Wave 2 (TD1-TD9 tech-debt cluster, RL6/7/8), Wave 3 (FN1 identity spine, FN2 history, F2 comps platform), Final (FN8/FN9/FN10/FN11, F2 detail, TD10).
