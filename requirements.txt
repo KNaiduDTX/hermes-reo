@@ -7,6 +7,8 @@ beautifulsoup4==4.15.0
 pytesseract==0.3.13
 pillow==11.3.0
 pypdf==6.16.1
+fastapi==0.128.8
+uvicorn==0.39.0
 
 # dev/test
 ruff==0.16.4
