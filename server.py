@@ -771,6 +771,26 @@ def compute_market(deals: list, groupby: str, today: date | None = None) -> list
     return rows
 
 
+@app.get("/api/digest", summary="Latest weekly deal-flow digest (markdown)")
+def api_digest() -> JSONResponse:
+    """Audit R-6/ORCH-4: the weekly digest was artifact-only.
+
+    write_weekly_digest has rendered data/digest_<ISO-week>.md on every live
+    and fixture run since F9, but no HTTP surface exposed it (F9's promised
+    GET /api/digest regressed to artifact-only). Returns the newest digest.
+    """
+    candidates = sorted(DATA_DIR.glob("digest_*.md"))
+    if not candidates:
+        raise DataUnavailableError(
+            DATA_DIR / "digest_<ISO-week>.md", "no weekly digest written yet")
+    latest = candidates[-1]
+    try:
+        content = latest.read_text(encoding="utf-8")
+    except OSError as exc:
+        raise DataUnavailableError(latest, f"unreadable: {exc}") from exc
+    return JSONResponse(content={"file": latest.name, "content": content})
+
+
 @app.get("/api/market", summary="Deal aggregates grouped by zip | city | isd | county")
 def api_market(groupby: str = "") -> JSONResponse:
     """/api/market?groupby=zip|city|isd|county → {groupby, groups: [...]}.

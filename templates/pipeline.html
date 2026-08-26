@@ -4,8 +4,40 @@
 
 {% block head_actions %}
 <span class="num pipe-head-meta" id="headRunMeta" hidden></span>
-<button class="btn btn-secondary" type="button">New scrape</button>
-<button class="btn btn-primary" type="button">Run pipeline</button>
+<button class="btn btn-secondary" type="button" id="pipeNewScrape">New scrape</button>
+<button class="btn btn-primary" type="button" id="pipeRunChecks">Run pipeline</button>
+<script>
+/* Audit UI-03: these buttons rendered for months with no handlers. New scrape
+   runs the live-portal smoke tier (POST /api/system/run-live); Run pipeline
+   runs the core self-check suite (POST /api/system/run-checks). Results surface
+   inline in the head meta chip — nothing auto-sends anywhere (draft posture). */
+(function () {
+  function wire(btnId, url, label, confirmText) {
+    const btn = document.getElementById(btnId);
+    const meta = document.getElementById('headRunMeta');
+    if (!btn) return;
+    btn.addEventListener('click', function () {
+      if (confirm && this.dataset.confirm && !window.confirm(this.dataset.confirm)) return;
+      btn.disabled = true;
+      meta.hidden = false;
+      meta.textContent = 'running ' + label + '…';
+      fetch(url, { method: 'POST' })
+        .then(function (r) { return r.json(); })
+        .then(function (j) {
+          const last = (j.tail || []).slice(-1)[0] || '';
+          meta.textContent = (j.ok ? '✓ ' : '✗ ') + label + (last ? ' — ' + last : '');
+          btn.disabled = false;
+        })
+        .catch(function (e) {
+          meta.textContent = '✗ ' + label + ' failed: ' + e.message;
+          btn.disabled = false;
+        });
+    });
+  }
+  wire('pipeNewScrape', '/api/system/run-live', 'live portal smoke', true);
+  wire('pipeRunChecks', '/api/system/run-checks', 'self-checks', false);
+})();
+</script>
 {% endblock %}
 
 {% block body %}

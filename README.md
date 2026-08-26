@@ -14,7 +14,9 @@ offer drafts, portfolio analytics, an Excel model suite, and a FastAPI dashboard
 make setup                      # venv + pinned deps + Playwright chromium
 make ci-local                   # exact CI-parity gates (lint → tests → checks → fixture → build)
 make fixture                    # offline end-to-end pipeline run into data/fixtures/
-uvicorn server:app              # dashboard at http://127.0.0.1:8000 (reads data/*.json live)
+make desk                      # single command: Diligence Desk at http://127.0.0.1:8000
+                               #   (legacy portfolio SPA mounted at /lab/)
+uvicorn server:app             # legacy portfolio SPA alone at http://127.0.0.1:8123
 ```
 
 Daily operation (scraping counties, HITL comp intake, offer generation) is

@@ -59,6 +59,7 @@ DECLARED_HOOKS = {
     "data-endpoint-cpr": "/api/cpr/",
     "data-endpoint-memo": "/api/memo/",
     "data-endpoint-market": "/api/market?groupby=",
+    "data-endpoint-digest": "/api/digest",
     "data-action-generate-offer": "/api/generate-offer",
     "data-action-clerk-search": "/api/clerk-search",
 }

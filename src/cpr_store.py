@@ -66,9 +66,15 @@ def generate_all(deals_path: str, out_dir: str, limit: int | None = None,
         records = json.load(f)
     import os
     os.makedirs(out_dir, exist_ok=True)
-    ok = skipped = failed = 0
+    ok = failed = 0
     failures = []
-    for i, rec in enumerate(records[:limit] if limit else records, 1):
+    # Audit CPR-2: seed pid from the record BEFORE build_cpr so the except
+    # handler below can never hit an UnboundLocalError (a first-record crash
+    # used to escape the "batch must continue" catch and kill the whole book),
+    # and later failures are never mislabeled with a previous record's id.
+    selected = records[:limit] if limit else records
+    for i, rec in enumerate(selected, 1):
+        pid = str(rec.get("parcel_id") or "") or f"row-{i}"
         try:
             pid, payload = build_cpr(rec)
             write_json(os.path.join(out_dir, _safe_name(pid) + ".json"), payload)
@@ -79,7 +85,9 @@ def generate_all(deals_path: str, out_dir: str, limit: int | None = None,
             continue
         if on_progress and i % 25 == 0:
             on_progress(i, ok, failed)
-    skipped = len(records) - ok - failed
+    # Audit CPR-2: 'skipped' now means "not attempted because of limit",
+    # not a meaningless near-zero residual.
+    skipped = len(records) - len(selected)
     return {"total": len(records), "ok": ok, "failed": failed,
             "skipped": skipped, "failures": failures}
 

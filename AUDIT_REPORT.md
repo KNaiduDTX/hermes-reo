@@ -293,3 +293,27 @@ All 43 opportunities from OPPORTUNITY_MAP.md are executed or explicitly closed. 
 
 ## E2E MILESTONE — Aug 26, 2026
 Every record in the book now has a saved, reloadable CPR (data/cprs/, keyed by durable property_id) and renders across the full desk. Parcel selectors added to Dossier + Offers; offers economics derive per-parcel. Automated whole-book validation: tests/test_desk_e2e.py (6 tests iterate all 166 assets through dossier/uw-defaults/offers). Live route matrix: all 200 incl. register-level degraded path and wholesale-blocked variant.
+
+# E2E ORCHESTRATION SWARM — Aug 26, 2026
+
+**Method:** eight-lens read-only audit swarm at HEAD c7390f6 (scraping/adapters, CPR/validation chain, underwriting/pricing, HITL/comps, dashboard/desk, orchestration, testing/CI, external research) + adversarial re-verification of every High-impact claim against source. Fixes below were confirmed at file:line by at least one auditor AND re-checked directly before implementation.
+
+## Verified gaps closed (with tests)
+
+| Fix | Audit ids | What changed |
+|---|---|---|
+| cpr_store.generate_all crash + wire-up | CPR-1/CPR-2/ORCH-3 | pid seeded before try (first-record failure no longer escapes the batch catch; failures keep their own ids); skipped = limit residue; generate_all now runs in the find_deals main tail so data/cprs/ regenerates with every dataset write |
+| GATE-LEGAL-LIEN not_run pass | CPR-3 | not_run + non-empty stack routes to hitl (title-search-pending) instead of passing on an unverified OCR-only stack; self-check + regression tests updated |
+| Routed underwriting in the shared tail | UW-1/UW-3 | process_valued_cpr called flip_pnl directly — every SHORT/SUBTO/TAXDEED memo got flip economics. Now routes via route_underwrite keyed off cpr.deal_type; DT-WHOLESALE prices via wholesale_mao (0.65x minus fee, matching the workbook) with loud fallback only when required kwargs are missing |
+| Investor pack CLI surface | UW-2/F5 | --resume-valued-dir now aggregates batch_price into data/investor_pack.csv (pass-verdict files only, best-effort) |
+| Weekly digest HTTP surface | R-6/ORCH-4 | GET /api/digest + SPA overview card (F9's promised endpoint was artifact-only) |
+| Workbook/Python drift | UW-5 | Auction Bid walk-away =B13 (was x1.05, contradicting the H3 clamp); Subject-To CoC denominator includes new buyer-closing-costs input B9; formula-string regression asserts added |
+| Two frontends, dead buttons, inert selector | UI-01/02/03/09 | dashboard.py mounts the legacy SPA at /lab (one process serves everything); pipeline.html buttons wired to run-live/run-checks; dossier clerk button posts /lab/api/clerk-search; offers selector populated from /api/parcels; make desk target + README rows; tests/test_desk_smoke.py (12 tests) |
+| Desk economics laundering a fake ARV | HITL-3 | /api/uw-defaults surfaces arv_basis (gate_val_arv / cad_appraised_value / placeholder_750k_unverified) instead of silently falling back to $750k |
+| Resume exits OK without an offer | HITL-7 | --resume-valued returns exit 1 + RESUME-PARTIAL when offer generation died |
+| Daily-driver silent-empty scrape | SCR-1/SCR-3 | find_deals scrape_live_collin no longer swallows adapter raise-not-swallow into []; pipeline --live zero-leads with no floor prints a loud ZERO-LEADS warning (exit-0 contract preserved) |
+| CI/local ratchet parity | TEST-1 | make verify's test leg now runs the instrumented coverage target, matching ci.yml exactly |
+
+**Gates:** make ci-local ALL GREEN post-change (lint -> instrumented pytest w/ coverage ratchet -> 21 self-checks -> offline fixture E2E -> workbook build). New tests: test_cpr_store_failfast, test_lien_gate_notrun, test_desk_smoke, 2 workbook formula asserts.
+
+**Known-open (verified, deliberately deferred):** F8 transaction surface (CLI/UI driving transaction.transition), route-optimizer wiring (ORCH-2), Short-Sale workbook tab (UW-6), playbooks for non-distressed sellers (UW-4), DealType enum completeness (UW-7), numeric coercion module (CPR-7), neighborhood-radius comp seeding (HITL-4), CRM-shaped CSV export (R-2), alt-channel registry spike (R-3), snapshot/backup for data/ (TEST-4/RL6), desk e2e hardening depth (UI-05), synthesis pytest port (TEST-6).

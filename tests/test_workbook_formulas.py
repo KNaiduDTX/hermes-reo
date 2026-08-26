@@ -68,3 +68,20 @@ def test_all_15_tabs_present():
                 "Tax-Deed", "Wholesale", "Auction Bid", "Subject-To",
                 "Sensitivity", "Portfolio", "Checks"}
     assert set(_wb().sheetnames) == expected
+
+
+def test_auction_walkaway_equals_ceiling_not_105pct():
+    """AUDIT UW-5: Python clamps walk-away AT the ceiling (pricing H3); the
+    old 105% multiplier told operators to bid over max offer."""
+    ws = _wb()["Auction Bid"]
+    assert ws["B14"].value == "=B13", ws["B14"].value
+
+
+def test_subject_to_coc_denominator_includes_closing_costs():
+    """AUDIT UW-5: Python cash_invested = cash_to_seller + closing_buy
+    (underwriting.py subject_to_model); CoC must divide by both."""
+    ws = _wb()["Subject-To"]
+    formula = str(ws["B15"].value)
+    assert "B14/(B7+B9)" in formula, formula
+    label = str(ws["A9"].value or "")
+    assert "closing" in label.lower(), label

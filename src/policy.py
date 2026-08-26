@@ -15,6 +15,14 @@ from __future__ import annotations
 MAO_FACTOR_DEFAULT = 0.70          # 70% rule
 REHAB_CONTINGENCY_PCT = 0.20       # industry standard 10–25% by scope
 
+# --- Wholesale (audit UW-3) ----------------------------------------------
+# Seller price for wholesale = (ARV x 0.65) - rehab - fee, matching the
+# workbook Wholesale tab (Assumptions!assignment_fee default = $10,000, "DFW
+# market — $5-15k typical"). The engine previously quoted the 70% rule here,
+# so a memo and the workbook disagreed about the same deal.
+WHOLESALE_FACTOR_DEFAULT = 0.65
+WHOLESALE_ASSIGNMENT_FEE = 10_000.0
+
 # --- Closing costs (fraction of price) ----------------------------------
 CLOSING_BUY_PCT = 0.025            # TX title promulgated + escrow + recording
 CLOSING_SELL_PCT = 0.075           # ~5-6% commission + title + concessions
@@ -53,6 +61,8 @@ def self_check() -> None:
     """Guard against accidental value drift from the audited defaults."""
     assert MAO_FACTOR_DEFAULT == 0.70
     assert REHAB_CONTINGENCY_PCT == 0.20
+    assert WHOLESALE_FACTOR_DEFAULT < MAO_FACTOR_DEFAULT
+    assert 5_000 <= WHOLESALE_ASSIGNMENT_FEE <= 15_000
     assert CLOSING_SELL_PCT == 0.075 and CLOSING_BUY_PCT == 0.025
     assert BLAST_TIER_T2_MAX < BLAST_TIER_T3_MAX
     assert EARNEST_MONEY_PCT > OPTION_FEE_PCT

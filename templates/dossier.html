@@ -6,9 +6,53 @@
         onchange="if(this.value) location='/deals/'+encodeURIComponent(this.value)">
   <option value="{{ parcel_id }}">{{ parcel_id }} (current)</option>
 </select>
-<button class="btn btn-secondary" type="button" title="Clerk search is a human-review action (Phase 2A)">Run clerk search</button>
+<button class="btn btn-secondary" type="button" id="dossier-clerk-btn"
+        title="Live read-only Collin clerk search by party name (draft posture)">Run clerk search</button>
 <a class="btn btn-primary" href="/offers?parcel={{ parcel_id }}">Generate offer</a>
 <script>
+/* Audit UI-03: the clerk button was rendered dead since the desk launched —
+   its backing POST /api/clerk-search lives on the legacy SPA, now mounted at
+   /lab. Read-only search by party name; results are shown, never auto-sent. */
+document.getElementById('dossier-clerk-btn').addEventListener('click', function () {
+  const owner = (document.body.dataset.ownerName || '').trim();
+  const party = window.prompt('Party name to search in Collin clerk records:', owner);
+  if (!party || !party.trim()) return;
+  const btn = this;
+  btn.disabled = true;
+  btn.textContent = 'searching…';
+  fetch('/lab/api/clerk-search', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ party_name: party.trim() })
+  }).then(r => r.json().then(j => ({ ok: r.ok, status: r.status, j })))
+    .then(({ ok, status, j }) => {
+      btn.disabled = false;
+      btn.textContent = 'Run clerk search';
+      if (!ok) {
+        window.alert('Clerk search unavailable (' + status + '): ' + (j.detail || 'unknown error'));
+        return;
+      }
+      const lines = [
+        'Party: ' + j.party_name,
+        'Instruments: ' + j.instrument_count,
+        'Encumbrances: ' + j.encumbrance_count,
+        (j.preview_truncated ? '(preview truncated)' : '')
+      ].filter(Boolean).join('
+');
+      const first = (j.preview || [])[0];
+      if (first) {
+        lines.push('Most recent: ' + (first.instrument_date || first.date || 'n/a') +
+                   ' — ' + (first.instrument_type || first.type || 'instrument'));
+      }
+      window.alert(lines.join('
+'));
+    })
+    .catch(e => {
+      btn.disabled = false;
+      btn.textContent = 'Run clerk search';
+      window.alert('Clerk search failed: ' + e.message);
+    });
+});
 fetch('/api/parcels').then(r=>r.json()).then(j=>{
   const sel=document.getElementById('dossier-parcel-select');
   const cur=sel.value;

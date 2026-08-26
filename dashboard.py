@@ -608,8 +608,18 @@ def api_uw_defaults(parcel: str = "4003592"):
     from src.underwriting import flip_pnl
 
     valuation = cpr.get("valuation") or {}
-    arv = float((valuation.get("arv") or {}).get("value") or 0) \
-        or money(pv("cad_appraised_value")) or 750_000
+    # Audit HITL-3: the fallback chain (saved ARV -> CAD -> $750k placeholder)
+    # used to be invisible, so desk economics could ride a fake signal that
+    # GATE-VAL exists to block. The basis is now surfaced explicitly; the
+    # placeholder is kept ONLY as a clearly-labeled what-if default.
+    saved_arv = float((valuation.get("arv") or {}).get("value") or 0)
+    cad_value = money(pv("cad_appraised_value"))
+    if saved_arv:
+        arv, arv_basis = saved_arv, "gate_val_arv"
+    elif cad_value:
+        arv, arv_basis = cad_value, "cad_appraised_value"
+    else:
+        arv, arv_basis = 750_000, "placeholder_750k_unverified"
     rehab = 50_000
     mao = max(0.0, arv * MAO_FACTOR_DEFAULT - rehab)
     uw = flip_pnl(arv=arv, purchase=mao, rehab=rehab, holding=5_000,
@@ -619,7 +629,8 @@ def api_uw_defaults(parcel: str = "4003592"):
     return {
         "parcel_id": str(pv("parcel_id") or parcel),
         "address": str(pv("situs_address") or ""),
-        "arv": arv, "purchase": mao, "rehab": rehab,
+        "arv": arv, "arv_basis": arv_basis,
+        "purchase": mao, "rehab": rehab,
         "rent": max(rent, 1200), "contingency": 0.20,
         "mao_factor": MAO_FACTOR_DEFAULT, "loan_rate": 0.061,
         "holding": 5_000, "financing": 10_000,
@@ -695,6 +706,18 @@ def api_summary():
 def api_deals():
     from server import api_deals as d
     return d()
+
+
+# Audit UI-01/UI-09: ONE process now serves the whole product — the
+# Diligence Desk pages at / plus the legacy portfolio SPA under /lab/
+# (server.py is offline-safe at import; the desk must boot even if the SPA
+# import ever fails, so the mount is guarded).
+try:
+    import server as _spa
+    app.mount("/lab", _spa.app)
+except Exception as _spa_exc:  # pragma: no cover — SPA optional at desk runtime
+    import logging as _logging
+    _logging.getLogger(__name__).warning("legacy SPA mount skipped: %r", _spa_exc)
 
 
 if __name__ == "__main__":

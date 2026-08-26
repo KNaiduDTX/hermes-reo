@@ -6,7 +6,7 @@ RUFF     := .venv/bin/ruff
 SOFFICE  := /Applications/LibreOffice.app/Contents/MacOS/soffice
 XLSX     := out/HERMES-REO_Model_Suite.xlsx
 
-.PHONY: help setup lock lint lint-full test test-live coverage checks fixture build recalc verify ci-local all clean
+.PHONY: help setup lock lint lint-full test test-live coverage checks fixture build recalc desk verify ci-local all clean
 
 help:
 	@echo "make setup    - create venv + install pinned deps + playwright browser"
@@ -20,9 +20,11 @@ help:
 	@echo "make fixture  - offline end-to-end pipeline into data/fixtures/"
 	@echo "make build    - rebuild the Excel workbook"
 	@echo "make recalc   - LibreOffice headless recalc + recalculated verification"
+	@echo "make desk     - run the Diligence Desk (incl. legacy SPA at /lab/) on :8000"
 	@echo "make verify   - lint + tests + checks + fixture + build (CI parity)"
 	@echo "make ci-local - exact CI parity: the gates CI runs (verify; recalc stays local)"
 	@echo "make all      - verify + recalc"
+	@echo "make desk     - Diligence Desk at :8000 (SPA under /lab/)"
 
 setup:
 	python3 -m venv .venv
@@ -62,11 +64,20 @@ fixture:
 build:
 	$(PY) build_workbook.py
 
+# Audit UI-01: the Diligence Desk had no documented launch path — this is the
+# single command that serves the whole product: desk pages at / plus the
+# legacy portfolio SPA mounted under /lab/.
+desk:
+	.venv/bin/uvicorn dashboard:app --host 127.0.0.1 --port 8000
+
 recalc: build
 	$(SOFFICE) --headless -env:UserInstallation=file:///tmp/lo_hermes --calc --convert-to xlsx $(XLSX) --outdir out/recalc/
 	$(PY) -m pytest test_recalc.py -m recalc
 
-verify: lint test checks fixture build
+# Audit TEST-1: CI runs instrumented pytest with the coverage ratchet
+# (ci.yml --cov-fail-under), so a bare-pytest verify could pass locally and
+# fail remotely. Point the test leg at the coverage target for real parity.
+verify: lint coverage checks fixture build
 	@echo "== verify: ALL GATES GREEN =="
 
 # Exact parity with .github/workflows/ci.yml job `verify`: same gates (lint,

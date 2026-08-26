@@ -185,6 +185,18 @@ def gate_legal_lien(cpr: CPR) -> GateResult:
                           "No lien search performed — mandatory before pricing/bidding",
                           {"lien_count": 0})
 
+    # Audit CPR-3: a stack carried with lookup_status='not_run' (e.g. a Dallas
+    # live parcel whose only lien is self-derived from OCR'd debt) used to fall
+    # through to a clean 'pass' below — zero verification, clean-title verdict.
+    # An unverified stack routes to title-search HITL, never to pricing.
+    if lookup_status != "ok":
+        return GateResult("GATE-LEGAL-LIEN", "hitl",
+                          "title-search-pending — encumbrance stack present but the "
+                          "lien lookup has not been completed; the stack is unverified. "
+                          "Run the clerk/title search before pricing or bidding.",
+                          {"lien_lookup_status": lookup_status,
+                           "lien_count": len(cpr.liens)})
+
     surviving = [l for l in cpr.liens if l.survives_foreclosure or l.survives_tax_sale]
     senior_surviving = [l for l in cpr.liens if l.priority == 1 and l.survives_foreclosure]
 
@@ -269,6 +281,12 @@ if __name__ == "__main__":
 
     cpr.add_lien(LienRecord(lien_type="mortgage", amount=300_000, priority=1,
                             survives_foreclosure=False), "test")
+    # Audit CPR-3: a not_run lookup with a stack in hand must NEVER pass —
+    # it routes to title-search HITL until a real lookup completes.
+    r_unverified = gate_legal_lien(cpr)
+    assert r_unverified.verdict == "hitl"
+    assert "title-search-pending" in r_unverified.reason
+    cpr.lien_lookup_status = "ok"
     r2 = gate_legal_lien(cpr)
     assert r2.verdict == "pass"
 
@@ -276,6 +294,7 @@ if __name__ == "__main__":
     cpr2 = CPR(parcel_id="test2", county="collin", deal_type="DT-AUCTION")
     cpr2.add_lien(LienRecord(lien_type="mortgage", amount=300_000, priority=1,
                              survives_foreclosure=True), "test")
+    cpr2.lien_lookup_status = "ok"  # CPR-3: stack-content checks need a completed lookup
     r3 = gate_legal_lien(cpr2)
     assert r3.verdict == "hitl"
     assert "Senior lien" in r3.reason

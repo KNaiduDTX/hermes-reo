@@ -692,6 +692,18 @@ async function loadStats(){
   }
 }
 
+/* --- weekly digest (audit R-6/ORCH-4: artifact-only surface now served) --- */
+async function loadDigest(){
+  try{
+    const d = await fetchJSON('/api/digest');
+    $('digestFile').textContent = d.file || '';
+    $('digestBody').textContent = d.content || '(empty digest)';
+  }catch(err){
+    $('digestFile').textContent = '';
+    $('digestBody').textContent = 'digest unavailable: ' + err.message;
+  }
+}
+
 /* ================= BOOT ================= */
 function setStatus(ok, text){
   $('statusDot').className = 'dot'+(ok?' ok':'');
@@ -709,6 +721,7 @@ async function boot(){
     renderOverview();
     populateFilterOptions();
     renderTable();
+    loadDigest();
   }catch(err){
     setStatus(false,'API offline');
     showError('ovError','Data unavailable: '+err.message);

@@ -25,6 +25,7 @@ import hashlib
 import re
 import json
 import os
+from pathlib import Path
 import subprocess
 import sys
 import time
@@ -377,7 +378,7 @@ def process_valued_cpr(cpr: CPR, rehab: float = DEFAULT_REHAB_ESTIMATE,
     attached — callers decide their own exit semantics for that case.
     """
     from src.cpr import pv_value
-    from src.underwriting import flip_pnl, mao
+    from src.underwriting import flip_pnl, mao, route_underwrite, wholesale_mao
     from src.pricing import price_deal
     from src.deal_memo import render_memo
     from src.reviewer import run_review
@@ -393,24 +394,53 @@ def process_valued_cpr(cpr: CPR, rehab: float = DEFAULT_REHAB_ESTIMATE,
               "passed GATE-VAL first")
         return None
 
-    # Step 5: Underwrite
-    print("\n[5/7] UNDERWRITE — Fix-and-flip model")
+    # Step 5: Underwrite — ROUTED by deal type (audit UW-1/UW-3). The shared
+    # fixture AND --resume-valued tail previously called flip_pnl directly, so
+    # a DT-SHORT/SUBTO/TAXDEED/WHOLESALE CPR got flip economics in its memo.
+    print("\n[5/7] UNDERWRITE — deal-type-routed model")
+    deal_type = str(pv_value(getattr(cpr, "deal_type", "")) or "DT-AUCTION")
+    print(f"  Deal type: {deal_type}")
     # B4: policy wiring — closing costs and MAO factor come from src.policy so
     # this model can never drift from the Excel Assumptions tab again (the old
     # inline arv*0.08 disagreed with the workbook's 7.5%).
-    uw = flip_pnl(
-        arv=arv, purchase=mao(arv, rehab, policy.MAO_FACTOR_DEFAULT), rehab=rehab,
-        holding=5_000, financing=10_000, closing_buy=5_000,
-        closing_sell=arv * policy.CLOSING_SELL_PCT,
-    )
+    mao_price = mao(arv, rehab, policy.MAO_FACTOR_DEFAULT)
+    flip_stack = {"holding": 5_000, "financing": 10_000,
+                  "closing_buy": 5_000,
+                  "closing_sell": arv * policy.CLOSING_SELL_PCT}
+    if deal_type == "DT-WHOLESALE":
+        # UW-3: quote the wholesale seller price (0.65x minus assignment fee),
+        # matching the workbook Wholesale tab, not the 70% rule.
+        purchase = wholesale_mao(arv, rehab, policy.WHOLESALE_ASSIGNMENT_FEE)
+        print(f"  Wholesale MAO ({policy.WHOLESALE_FACTOR_DEFAULT:.0%} minus "
+              f"${policy.WHOLESALE_ASSIGNMENT_FEE:,.0f} fee): ${purchase:,.0f}")
+    else:
+        purchase = mao_price
+        print(f"  MAO ({policy.MAO_FACTOR_DEFAULT:.0%} rule): ${purchase:,.0f}")
+    if deal_type == "DT-TAXDEED":
+        uw_kwargs = {"bid": mao_price}
+    elif deal_type == "DT-SUBTO":
+        uw_kwargs = {}
+        loan = pv_value(getattr(cpr, "mortgage_debt", None))
+        if loan:
+            uw_kwargs["existing_loan_balance"] = float(loan)
+    else:
+        uw_kwargs = {"purchase": purchase, **flip_stack}
+    try:
+        uw = route_underwrite(cpr, arv=arv, rehab=rehab,
+                              deal_type=deal_type, **uw_kwargs)
+    except ValueError as exc:
+        # LOUD fallback (the router itself refuses silent defaults): batch
+        # continues so artifacts exist, but the run log names the refusal.
+        print(f"  !! route_underwrite refused: {exc}")
+        print("  !! Falling back to flip economics for artifact continuity")
+        uw = flip_pnl(arv=arv, purchase=mao_price, rehab=rehab,
+                      deal_type=deal_type, **flip_stack)
     print(f"  Model: {uw.model}")
-    print(f"  MAO ({policy.MAO_FACTOR_DEFAULT:.0%} rule): ${mao(arv, rehab, policy.MAO_FACTOR_DEFAULT):,.0f}")
     print(f"  Purchase: ${uw.purchase_price:,.0f} | Rehab: ${uw.rehab:,.0f} (w/contingency: ${uw.line_items['rehab_with_contingency']:,.0f})")
     print(f"  Net profit: ${uw.net_profit:,.0f} | ROI: {uw.roi:.1%}")
 
     # Step 6: Pricing
     print("\n[6/7] PRICING — MAO, bid ceiling, offer ladder, sensitivity")
-    deal_type = str(pv_value(getattr(cpr, "deal_type", "")) or "DT-AUCTION")
     pricing = price_deal(
         cpr, arv=arv, rehab=rehab, deal_type=deal_type,
         factor=policy.MAO_FACTOR_DEFAULT, capital_at_risk=uw.cash_invested,
@@ -670,6 +700,16 @@ def run_resume_valued_pipeline(valued_path: str,
     if summary is not None and stamped:
         summary.bump(RESUME_SUMMARY_SOURCE, "written_back", stamped)
 
+    if result.get("offer_path") is None:
+        # Audit HITL-7: process_valued_cpr swallows negotiation failures
+        # ("Negotiation skipped") but this driver used to return EXIT_OK, so a
+        # memo-without-offer was indistinguishable from a complete resume.
+        if summary is not None:
+            summary.bump(RESUME_SUMMARY_SOURCE, "errors")
+        print("!! RESUME-PARTIAL: memo written but offer generation failed — "
+              "see the negotiation error above; re-run after fixing it")
+        return exit_code_for("usage")
+
     print("\n" + "=" * 70)
     print("  RESUME COMPLETE — memo/offer written under production names")
     print("=" * 70)
@@ -717,6 +757,40 @@ def run_resume_valued_dir_pipeline(dir_path: str,
             aggregate["skipped_not_pass"] += 1
         else:
             aggregate["errors"] += 1
+
+    # UW-2 (F5): aggregate the batch into ONE investor-pack CSV via
+    # pricing.batch_price/to_csv — implemented and tested but previously
+    # unreachable from any CLI, so the batch left only per-parcel artifacts.
+    # A pack failure must never change the batch disposition.
+    if aggregate["resumed"]:
+        try:
+            from src.hitl import load_cpr
+            from src.pricing import batch_price, to_csv
+            resumed_cprs = []
+            for valued_path in files:
+                try:
+                    raw = json.loads(Path(valued_path).read_text(encoding="utf-8"))
+                except (OSError, ValueError):
+                    continue
+                val = raw.get("valuation") or {}
+                if str(val.get("gate_val_verdict", "")).lower() != "pass":
+                    continue
+                try:
+                    resumed = load_cpr(valued_path)
+                    resumed.valuation = restore_serialized_valuation(raw)
+                    resumed_cprs.append(resumed)
+                except Exception:  # noqa: BLE001 — one bad file never kills the pack
+                    continue
+            rows = batch_price(resumed_cprs)
+            if rows:
+                pack_dir = output_dir or os.path.join(
+                    os.path.dirname(os.path.abspath(__file__)), "data")
+                os.makedirs(pack_dir, exist_ok=True)
+                pack_path = write_text(os.path.join(pack_dir, "investor_pack.csv"),
+                                       to_csv(rows))
+                print(f"  Investor pack: {pack_path} ({len(rows)} priced rows)")
+        except Exception as exc:  # noqa: BLE001 — pack is best-effort
+            print(f"  !! investor pack skipped: {exc!r}")
 
     print("\n" + "=" * 70)
     print(f"  RESUME-DIR COMPLETE — {dir_path}")
@@ -997,6 +1071,16 @@ def run_live_pipeline(county: str, limit: int, allow_gate_fail_demo: bool = Fals
         print("!! Investigate the portal before trusting this run's emptiness.")
         print("!" * 70)
         sys.exit(exit_code_for("min_leads"))
+    if not leads and not min_leads:
+        # Audit SCR-3 (warning scope): with no floor configured, zero leads
+        # still exits 0 — keep that contract, but never silently. The floor
+        # exists precisely so an operator cannot mistake this for clean data.
+        print("\n" + "!" * 70)
+        print("!! ZERO LEADS with no --min-leads floor configured — exiting 0,")
+        print("!! but an empty pull is statistically suspicious for an active")
+        print("!! county portal. Re-run with --min-leads N to enforce a floor,")
+        print("!! which turns a collapse into a loud nonzero exit.")
+        print("!" * 70)
 
     if not leads:
         print("  No leads found — pipeline complete.")

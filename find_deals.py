@@ -643,14 +643,12 @@ def scrape_live_collin(limit=5):
     """Live scrape Collin County for current notices."""
     print(f"\n[COLLIN] Live scraping foreclosure portal (limit={limit})...")
     adapter = CollinForeclosureAdapter()
-    try:
-        leads = adapter.fetch(limit=limit, extract_details=True)
-        print(f"  ✓ Sourced {len(leads)} live leads")
-        cprs = [enrich_lead(l) for l in leads]
-        return cprs
-    except Exception as e:
-        print(f"  ✗ Collin scrape failed: {e}")
-        return []
+    # Audit SCR-1: the adapter already fails loud on portal redesign and
+    # transport errors (RL1/RL2); swallowing them into [] here re-created the
+    # exact silent-empty-exit-0 hole on the daily-driver path. Let it raise.
+    leads = adapter.fetch(limit=limit, extract_details=True)
+    print(f"  ✓ Sourced {len(leads)} live leads")
+    return [enrich_lead(l) for l in leads]
 
 
 def analyze_deal(cpr: CPR) -> dict:
@@ -904,6 +902,21 @@ def main() -> None:
     print(f"\n  Saved: {deals_path} ({len(deals)} deals)")
     print(f"  Saved: {stats_path}")
     print(f"  Saved: {geojson_path} ({n_features} features)")
+
+    # Audit CPR-1: regenerate the saved CPR store so EVERY asset in the book
+    # has a reloadable CPR for the desk (data/cprs/). generate_all was
+    # reachable only from tests before, so the E2E milestone's "every record
+    # has a CPR" held only on machines where a human had run it manually.
+    try:
+        from src.cpr_store import generate_all
+        cprs_dir = os.path.join(output_dir, "cprs")
+        tally = generate_all(deals_path, cprs_dir)
+        print(f"  CPR store: {tally['ok']} ok / {tally['failed']} failed "
+              f"({tally['skipped']} skipped) -> {cprs_dir}")
+        if tally["failed"]:
+            print(f"  CPR store failures (first 3): {tally['failures'][:3]}")
+    except Exception as exc:  # noqa: BLE001 — store refresh must not kill the ranking run
+        print(f"  !! CPR store regeneration skipped: {exc!r}")
 
     # Final summary
     print("\n" + "=" * 70)

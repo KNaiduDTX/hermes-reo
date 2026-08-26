@@ -67,6 +67,28 @@
 </select>
 <button class="btn btn-secondary" type="button" id="of-copy"{% if not (engine_here or pb.on) %} disabled{% endif %}>Copy draft</button>
 <button class="btn btn-primary" type="button" disabled title="The desk drafts only — a human reviews and sends.">Send for review</button>
+<script>
+/* Audit UI-03 (P3): the parcel selector rendered one static option while the
+   server honored ?parcel= — commit 7bb1189 claimed selectors were added but
+   nothing populated this one. Same fetch pattern as the dossier selector. */
+(function () {
+  const sel = document.getElementById('offers-parcel-select');
+  if (!sel) return;
+  const cur = sel.value;
+  fetch('/api/parcels').then(r => r.json()).then(j => {
+    const parcels = (j && j.parcels) || [];
+    if (!parcels.length && !j.parcels) return;
+    sel.innerHTML = '';
+    for (const p of (j.parcels || parcels)) {
+      const o = document.createElement('option');
+      o.value = p.parcel_id;
+      o.textContent = p.parcel_id + (p.source ? ' (' + p.source + ')' : '');
+      if (p.parcel_id === cur) o.selected = true;
+      sel.appendChild(o);
+    }
+  }).catch(() => { /* selector stays on current parcel — page still works */ });
+})();
+</script>
 {% endblock %}
 
 {% block body %}

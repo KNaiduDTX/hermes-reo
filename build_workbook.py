@@ -1162,8 +1162,11 @@ def build_auction_bid_tab(wb):
     ws.cell(row=13, column=1).value = "Bid ceiling = min(MAO, cash, ARV-adjusted)"
     set_formula(ws, "B13", "=IF(gate_val_pass,MIN(B11,B6,B12),0)", USD_FMT, bold=True)
     add_name(wb, "bid_ceiling", "'Auction Bid'!$B$13")
-    ws.cell(row=14, column=1).value = "Walk-away (105% of ceiling)"
-    set_formula(ws, "B14", "=B13*1.05", USD_FMT)
+    # Audit UW-5: the Python engine clamps the walk-away AT the ceiling
+    # (pricing.py H3 — bidding over max offer is self-harming); the old 105%
+    # multiplier let the workbook tell operators to bid above MAO.
+    ws.cell(row=14, column=1).value = "Walk-away (= bid ceiling — never bid over max offer)"
+    set_formula(ws, "B14", "=B13", USD_FMT)
     ws.cell(row=15, column=1).value = "Surviving-lien-adjusted margin"
     set_formula(ws, "B15", '=IF(gate_val_pass,(arv_used-B13-B5-B7-B8)/arv_used,"GATE-VAL FAIL")', PCT_FMT)
 
@@ -1192,6 +1195,11 @@ def build_subject_to_tab(wb):
     set_input(ws, "B7", 10000, "Source: cash paid to seller for equity", USD_FMT)
     ws.cell(row=8, column=1).value = "ARV"
     set_link(ws, "B8", "=IF(gate_val_pass,arv_used,\"GATE-VAL FAIL\")", USD_FMT)
+    # Audit UW-5: Python's cash_invested = cash_to_seller + closing_buy
+    # (underwriting.py subject_to_model); the tab had no closing-cost input,
+    # so its CoC overstated returns vs the Python model.
+    ws.cell(row=9, column=1).value = "Buyer closing costs"
+    set_input(ws, "B9", 5000, "Source: TX title promulgated + escrow (policy CLOSING_BUY_PCT)", USD_FMT)
 
     subheader(ws, 10, "ANALYSIS")
     ws.cell(row=11, column=1).value = "Equity captured (ARV - loan - cash to seller)"
@@ -1202,8 +1210,8 @@ def build_subject_to_tab(wb):
     set_formula(ws, "B13", "=rent_estimate-B6", USD_FMT)
     ws.cell(row=14, column=1).value = "Annual cash flow"
     set_formula(ws, "B14", "=B13*12", USD_FMT)
-    ws.cell(row=15, column=1).value = "Cash-on-cash"
-    set_formula(ws, "B15", "=IF(B7>0,B14/B7,0)", PCT_FMT, bold=True)
+    ws.cell(row=15, column=1).value = "Cash-on-cash (on cash to seller + closing costs)"
+    set_formula(ws, "B15", "=IF((B7+B9)>0,B14/(B7+B9),0)", PCT_FMT, bold=True)
 
     subheader(ws, 17, "RISK FLAGS")
     ws.cell(row=18, column=1).value = "Due-on-sale risk"

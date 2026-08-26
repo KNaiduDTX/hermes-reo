@@ -201,6 +201,7 @@
       data-endpoint-cpr="/api/cpr/"
       data-endpoint-memo="/api/memo/"
       data-endpoint-market="/api/market?groupby="
+      data-endpoint-digest="/api/digest"
       data-action-generate-offer="/api/generate-offer"
       data-action-clerk-search="/api/clerk-search">
 
@@ -247,6 +248,11 @@
         <h2 class="panel-title" style="margin-top:14px">Top Lenders</h2>
         <table class="mini" id="lenderTable"></table>
       </div>
+    </div>
+
+    <div class="card">
+      <h2 class="panel-title">Weekly Deal-Flow Digest <span class="sub" id="digestFile"></span></h2>
+      <pre style="white-space:pre-wrap;color:var(--text);max-height:420px;overflow:auto;font-size:12px" id="digestBody">loading…</pre>
     </div>
   </section>
 
