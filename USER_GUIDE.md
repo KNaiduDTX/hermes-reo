@@ -514,3 +514,8 @@ stats — all reading the live dataset files on every request.
 
 Commit-time ruff correctness + naive-utcnow guards; push-time unit tests.
 Hooks are repo-local (`core.hooksPath=.githooks`) — no global install needed.
+
+The geocode failure ledger (`data/geocode_failures.json`) is created lazily
+on the first failed lookup — a fresh clone has none until you run
+`--geocode-backfill`. Addresses failing 3× within 7 days are skipped;
+override with `--retry-failed`.
