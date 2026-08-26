@@ -17,6 +17,8 @@ import server
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 DEALS_PATH = REPO_ROOT / "data" / "current_deals.json"
+DATA_PRESENT = DEALS_PATH.exists()
+
 GEOJSON_PATH = REPO_ROOT / "data" / "live_foreclosures.geojson"
 
 client = TestClient(server.app)
@@ -45,6 +47,7 @@ def test_static_dir_mounted():
 
 
 # ----------------------------------------------------------------- summary ---
+@pytest.mark.needs_dataset
 def test_api_summary_shape():
     """/api/summary returns the documented small KPI object."""
     resp = client.get("/api/summary")
@@ -59,6 +62,7 @@ def test_api_summary_shape():
     assert payload["geocoded"] <= payload["total"] or payload["total"] == 0
 
 
+@pytest.mark.needs_dataset
 def test_api_summary_total_matches_file():
     if not DEALS_PATH.exists():
         pytest.skip("data/current_deals.json not present")
@@ -73,6 +77,7 @@ def test_api_summary_total_matches_file():
 
 
 # ------------------------------------------------------------------- deals ---
+@pytest.mark.needs_dataset
 def test_api_deals_matches_file():
     if not DEALS_PATH.exists():
         pytest.skip("data/current_deals.json not present")
@@ -86,6 +91,7 @@ def test_api_deals_matches_file():
         assert deals[0].get("parcel_id") == on_disk[0].get("parcel_id")
 
 
+@pytest.mark.needs_dataset
 def test_api_geojson_feature_collection():
     if not GEOJSON_PATH.exists():
         pytest.skip("data/live_foreclosures.geojson not present")
@@ -98,6 +104,7 @@ def test_api_geojson_feature_collection():
 
 
 # ------------------------------------------------------------------- stats ---
+@pytest.mark.needs_dataset
 def test_api_stats_renders_report():
     """/api/stats renders markdown via portfolio_stats over enriched CPRs."""
     if not DEALS_PATH.exists():
@@ -133,3 +140,10 @@ def test_malformed_data_file_returns_503(tmp_path, monkeypatch):
     resp = client.get("/api/deals")
     assert resp.status_code == 503
     assert "unreadable" in resp.json()["detail"]
+
+
+@pytest.fixture(autouse=True)
+def _require_dataset(request):
+    """Data-backed endpoints 503 without data/; CI has no scraped dataset."""
+    if request.node.get_closest_marker("needs_dataset") and not DATA_PRESENT:
+        pytest.skip("data/current_deals.json not present on this environment")

@@ -8,7 +8,7 @@ import subprocess
 import sys
 
 REPO = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-PY = os.path.join(REPO, ".venv", "bin", "python")
+PY = sys.executable  # environment-portable: works in CI and local venv
 PIPELINE = os.path.join(REPO, "pipeline.py")
 
 
