@@ -538,6 +538,18 @@ async function openDetail(parcel){
 
   try{
     const cpr = await fetchJSON('/api/cpr/'+encodeURIComponent(parcel));
+  /* Audit HITL-5: comp-store read surface — show the stored comp count on
+     the detail view (read-only; seeding preview via /api/comps/). */
+  fetchJSON('/api/comps/'+encodeURIComponent(parcel))
+    .then(function (cj) {
+      var chip = document.getElementById('compsCount');
+      if (chip) {
+        chip.hidden = false;
+        chip.textContent = 'comps in store: ' + (cj.comp_count || 0) +
+          (cj.seed_available ? ' · seed available' : '');
+      }
+    })
+    .catch(function () { /* comps surface is additive — ignore */ });
     renderDetail(cpr);
     const owner = pvVal(cpr.owner_name);
     if (!$('clerkParty').value && owner) $('clerkParty').value = String(owner);

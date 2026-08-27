@@ -331,6 +331,67 @@ def filter_usable(records: list[CompRecord],
     return usable
 
 
+
+
+def suggest_nearby_seeds(subject_address: str, subject_county: str,
+                         comps_dir: Optional[str] = None,
+                         radius_mi: float = 0.5, limit: int = 10,
+                         geocode_fn=None) -> list[dict]:
+    """Audit HITL-4: neighborhood-radius comp seeding (SUGGESTIONS ONLY).
+
+    best_seed_for is exact-identity keyed; F2's stated goal was amortizing
+    one comp pull across a SUBDIVISION. This scans every store entry,
+    geocodes the candidate addresses (census geocoder by default - network,
+    opt-in by flag), and returns entries with a usable sale inside
+    *radius_mi* of the subject, labeled as suggestions. Nothing here writes
+    the store or attaches a valuation - the human still curates.
+    """
+    try:
+        from .adapters.census import geocode_address
+        from .adapters.route_optimizer import haversine
+    except ImportError:
+        from adapters.census import geocode_address
+        from adapters.route_optimizer import haversine
+
+    geocode_fn = geocode_fn or geocode_address
+    subject = geocode_fn(subject_address)
+    if subject.get("status") != "OK" or "lat" not in subject:
+        return []
+    sub_lat, sub_lng = float(subject["lat"]), float(subject["lng"])
+
+    seen: set = set()
+    suggestions: list[dict] = []
+    for pid in list_properties(comps_dir):
+        if pid in seen:
+            continue
+        seen.add(pid)
+        comps = load_comps(pid, comps_dir)
+        for comp in comps:
+            addr = getattr(comp, "address", "")
+            if not addr or getattr(comp, "sale_price", None) is None:
+                continue
+            coords = geocode_fn(addr)
+            if (coords.get("status") != "OK" and "lat" not in coords) \
+                    or coords.get("lat") is None:
+                continue
+            dist = haversine(sub_lat, sub_lng,
+                             float(coords["lat"]), float(coords["lng"]))
+            if dist > radius_mi:
+                continue
+            suggestions.append({
+                "source_property_id": pid,
+                "address": addr,
+                "sale_price": getattr(comp, "sale_price", None),
+                "sale_date": getattr(comp, "sale_date", None),
+                "distance_miles": round(dist, 3),
+                "source": getattr(comp, "source", ""),
+                "suggestion": True,  # never auto-accepted
+            })
+            if len(suggestions) >= limit:
+                return suggestions
+    return suggestions
+
+
 def best_seed_for(cpr: Any, comps_dir: Optional[str] = None,
                   as_of: Optional[date] = None,
                   pid: Optional[str] = None) -> list[CompRecord]:

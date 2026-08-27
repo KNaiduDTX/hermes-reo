@@ -57,6 +57,7 @@ DECLARED_HOOKS = {
     "data-endpoint-geojson": "/api/geojson",
     "data-endpoint-stats": "/api/stats",
     "data-endpoint-cpr": "/api/cpr/",
+    "data-endpoint-comps": "/api/comps/",
     "data-endpoint-memo": "/api/memo/",
     "data-endpoint-market": "/api/market?groupby=",
     "data-endpoint-digest": "/api/digest",

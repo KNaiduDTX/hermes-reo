@@ -791,6 +791,46 @@ def api_digest() -> JSONResponse:
     return JSONResponse(content={"file": latest.name, "content": content})
 
 
+@app.get("/api/comps/{parcel_id}", summary="Comp-store entry + seed preview")
+def api_comps(parcel_id: str) -> JSONResponse:
+    """Audit HITL-5: the comp store had zero read surfaces outside the hitl
+    CLI. Returns the stored comp set for one parcel plus the shared-store
+    seeding preview — read-only, nothing auto-attached."""
+    from src.comps import best_seed_for, load_comps, store_key_for_cpr
+
+    path = _locate(_cpr_paths(parcel_id))
+    if path is None:
+        raise ApiError(404, "cpr_not_found",
+                       f"no CPR snapshot for parcel {parcel_id!r}")
+    try:
+        from src.hitl import load_cpr
+        cpr = load_cpr(str(path))
+    except Exception as exc:
+        raise DataUnavailableError(path, f"CPR failed to load ({exc})") from exc
+
+    comps = load_comps(store_key_for_cpr(cpr))
+    try:
+        seed = best_seed_for(cpr)
+    except Exception:
+        seed = None
+    payload_comps = []
+    for c in comps:
+        payload_comps.append({
+            "address": getattr(c, "address", ""),
+            "sale_price": getattr(c, "sale_price", None),
+            "sale_date": getattr(c, "sale_date", None),
+            "distance_miles": getattr(c, "distance_miles", None),
+            "source": getattr(c, "source", ""),
+            "adjusted_price": getattr(c, "adjusted_price", None),
+        })
+    return JSONResponse(content={
+        "parcel_id": parcel_id,
+        "comp_count": len(payload_comps),
+        "comps": payload_comps,
+        "seed_available": bool(seed),
+    })
+
+
 @app.get("/api/market", summary="Deal aggregates grouped by zip | city | isd | county")
 def api_market(groupby: str = "") -> JSONResponse:
     """/api/market?groupby=zip|city|isd|county → {groupby, groups: [...]}.

@@ -51,6 +51,39 @@ REGISTRY: list[SourceEndpoint] = [
                    "", "tbd", "tbd",
                    "District clerk case search — verify in WS-00"),
 
+    # --- R-3 alt-channel feasibility spike (Aug 26 2026) ---------------------
+    # Candidate sourcing channels named by LEGAL_RULES (DT-PREFORE inputs)
+    # that the engine does not scrape. Registered as UNVERIFIED feasibility
+    # rows so a future adapter has a starting point; statuses are honest
+    # "tbd" until a live check lands. TD3/TD4 prerequisites are closed, so
+    # these are registry rows, not scraping promises.
+    SourceEndpoint("collin", "probate",
+                   "https://collin.tx.publicsearch.us", "tbd", "browser",
+                   "UNVERIFIED spike: probate/estate filings via the same "
+                   "publicsearch vendor as the clerk - candidate channel"),
+    SourceEndpoint("collin", "eviction_docket",
+                   "", "tbd", "tbd",
+                   "UNVERIFIED spike: JP-court eviction dockets - locate the "
+                   "JP precinct portal before any adapter work"),
+    SourceEndpoint("collin", "code_violation",
+                   "", "tbd", "tbd",
+                   "UNVERIFIED spike: city code-violation cases are MUNICIPAL "
+                   "(Plano/Frisco/McKinney each differ) - per-city registry "
+                   "rows only after a live check"),
+    SourceEndpoint("dallas", "probate",
+                   "", "tbd", "tbd",
+                   "UNVERIFIED spike: Dallas probate courts (StatProb) - "
+                   "verify public index availability"),
+    SourceEndpoint("dallas", "eviction_docket",
+                   "", "tbd", "tbd",
+                   "UNVERIFIED spike: Dallas JP eviction filings - public "
+                   "docket access unverified"),
+    SourceEndpoint("grayson", "tax_suit",
+                   "", "tbd", "tbd",
+                   "UNVERIFIED spike: Grayson district-clerk tax suits - "
+                   "feed the pre-foreclosure channel (county portals dead, "
+                   "clerks may not be)"),
+
     # Dallas County
     SourceEndpoint("dallas", "foreclosure_notice",
                    "https://www.dallascounty.org/government/county-clerk/recording/foreclosures.php",

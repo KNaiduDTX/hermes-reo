@@ -99,6 +99,9 @@ def test_get_endpoints_filters_by_county_channel_and_both():
     assert _pairs(collin) == {
         ("collin", "foreclosure_notice"), ("collin", "cad"),
         ("collin", "clerk"), ("collin", "tax_sale"), ("collin", "tax_suit"),
+        # R-3 alt-channel spike rows (unverified feasibility entries)
+        ("collin", "probate"), ("collin", "eviction_docket"),
+        ("collin", "code_violation"),
     }
 
     cad_rows = get_endpoints(channel="cad")
@@ -131,7 +134,15 @@ def test_unverified_complement_and_status_partition_of_the_registry():
     unverified = get_unverified_endpoints()
     assert _pairs(unverified) == {("collin", "tax_suit"),
                                   ("grayson", "struck_off"),
-                                  ("grayson", "tax_sale")}
+                                  ("grayson", "tax_sale"),
+                                  # R-3 alt-channel spike rows: honest tbd
+                                  # until a live check lands.
+                                  ("collin", "probate"),
+                                  ("collin", "eviction_docket"),
+                                  ("collin", "code_violation"),
+                                  ("dallas", "probate"),
+                                  ("dallas", "eviction_docket"),
+                                  ("grayson", "tax_suit")}
 
     live_pairs = _pairs(get_live_endpoints())
     unverified_pairs = _pairs(unverified)

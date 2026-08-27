@@ -273,6 +273,11 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--store-anyway", action="store_true",
                         help="F2: persist comps to the store even when the "
                              "verdict is not pass (default: pass only)")
+    parser.add_argument("--suggest-radius", metavar="MILES", type=float, default=None,
+                        help="HITL-4 MODE: list neighborhood comp-store seeds "
+                             "within MILES of the --cpr situs (SUGGESTIONS ONLY "
+                             "- geocodes store entries via the census geocoder; "
+                             "writes nothing). Requires --cpr.")
     parser.add_argument("--comps-dir", metavar="DIR", default=None,
                         help="F2 MODE: batch every <parcel>.comp.json in DIR "
                              "(with its <parcel>.json CPR) through intake -> "
@@ -280,6 +285,28 @@ def main(argv: list[str] | None = None) -> int:
                              "valued file is newer than their inputs are "
                              "skipped; exits nonzero only on batch errors")
     args = parser.parse_args(argv)
+
+    if args.suggest_radius is not None:
+        if not args.cpr:
+            parser.error("--suggest-radius requires --cpr (situs + county basis)")
+        from src.comps import suggest_nearby_seeds
+
+        cpr = load_cpr(args.cpr)
+        suggestions = suggest_nearby_seeds(
+            str(cpr.situs_address), str(cpr.county),
+            comps_dir=args.store_dir, radius_mi=args.suggest_radius)
+        if not suggestions:
+            print("No neighborhood seeds in the comp store within "
+                  f"{args.suggest_radius} mi — the store may be sparse or "
+                  "geocoding failed.")
+            return 0
+        print(f"NEIGHBORHOOD SEED SUGGESTIONS ({len(suggestions)} — human "
+              "curates; nothing attached automatically):")
+        for s in suggestions:
+            print(f"  - {s['address']} | ${s['sale_price']:,.0f} | "
+                  f"{s['sale_date'] or 'n/a'} | {s['distance_miles']} mi "
+                  f"| from store {s['source_property_id']} ({s['source']})")
+        return 0
 
     if args.comps_dir:
         return run_comps_dir_batch(args.comps_dir, store_dir=args.store_dir,
