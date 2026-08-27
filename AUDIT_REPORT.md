@@ -317,3 +317,17 @@ Every record in the book now has a saved, reloadable CPR (data/cprs/, keyed by d
 **Gates:** make ci-local ALL GREEN post-change (lint -> instrumented pytest w/ coverage ratchet -> 21 self-checks -> offline fixture E2E -> workbook build). New tests: test_cpr_store_failfast, test_lien_gate_notrun, test_desk_smoke, 2 workbook formula asserts.
 
 **Known-open (verified, deliberately deferred):** F8 transaction surface (CLI/UI driving transaction.transition), route-optimizer wiring (ORCH-2), Short-Sale workbook tab (UW-6), playbooks for non-distressed sellers (UW-4), DealType enum completeness (UW-7), numeric coercion module (CPR-7), neighborhood-radius comp seeding (HITL-4), CRM-shaped CSV export (R-2), alt-channel registry spike (R-3), snapshot/backup for data/ (TEST-4/RL6), desk e2e hardening depth (UI-05), synthesis pytest port (TEST-6).
+
+# HARDENING WAVES 1-5 — Aug 26-27, 2026 (goal: close every verified weak point)
+
+| Wave | Commit | Closed |
+|---|---|---|
+| 1 | 2da2f40 | CPR-7 (src/coerce.py numeric contract; 12.5->125 regression killed; range clamps: corrupted fields become None, never poisoned) · R-1 (absentee populated from CAD owner-mailing vs situs; ownership-years/deceased stay unsourced honestly) |
+| 2 | c8f0580 | UW-4 (playbooks 5->11, REO fallback demoted to truly-unknown only) · UW-7 (DealType SUBTO/RENTAL/BRRRR enumerated) · UW-8/R-5 (deal-type-correct dispositions + side-by-side flip/BRRRR/rental comparison in every memo, rental row labeled illustrative) |
+| 3 | 9b6ee18 | HITL-2/CPR-6 (resume recomputes GATE-VAL from restored comps — mismatch refuses exit 2; reviewer receives the real GateValResult instead of auto-passing on None) · HITL-6 (dataset regeneration preserves human pass verdicts from sibling .valued.json) |
+| 4 | 1ff28e8 | ORCH-1/F8 (--tx-status/--tx-advance CLI: state, history, whitelisted transitions, atomic write-back) · ORCH-2 (find_deals --plan-route TSP planner + first CLI flags) · ORCH-6 (run_history/ daily append) · R-2 (data/leads_crm.csv CRM-import-shaped) |
+| 5 | 4944b9f | TEST-4/RL6 (make snapshot, sha256 manifest + restore doc) · TEST-5 (gate_parity meta-test: ratchet numbers locked across ci.yml/Makefile; verify must enforce coverage) · TEST-6 (synthesis.py pinned in pytest) · ORCH-8 (USER_GUIDE operator loop) |
+
+**Gates:** make ci-local ALL GREEN at every wave commit. New suites: test_coerce (24), test_tx_cli (7), test_gate_parity (2), test_synthesis (3), + regenerated memo goldens under the frozen clock.
+
+**Still open (verified, source-blocked or larger builds):** UW-6 Short-Sale workbook tab, CPR-4 details-path Unknown-as-fact (partial via coercion), CPR-8 carried-field provenance stamps, SCR-2 health-report propagation, SCR-4 DCAD stats aggregation, SCR-5 typed-error generalization, R-3 alt-channel registry spike, R-4 deed-transfer comp suggester, HITL-4 radius comp seeding, HITL-5 comps endpoint, UI-05 desk-e2e depth, TEST-2 CI workbook-formula ordering, TEST-3 synthetic-dataset CI job, TEST-7 route-optimizer behavioral pins, TEST-8 venv/lockfile convergence, TEST-9 dead pre-push config.
