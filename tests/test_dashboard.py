@@ -8,7 +8,7 @@ tests are live (pytest.ini already deselects `-m live and -m recalc`).
 from __future__ import annotations
 
 import json
-from datetime import date
+from datetime import date, datetime, timezone
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -485,7 +485,10 @@ def test_clerk_search_transport_failure_is_503(monkeypatch):
 MARKET_ROW_KEYS = {"group", "deals", "median_cad", "total_debt",
                    "positive_equity_share", "upcoming_sales"}
 
-TODAY = date.today().isoformat()   # sale today counts as upcoming
+# TZ-robust (audit): compute_market compares against UTC-today; a local
+# date.today() diverges from it after 19:00 CDT and made this suite flake
+# every evening. Match the server's clock exactly.
+TODAY = datetime.now(timezone.utc).date().isoformat()   # sale today counts as upcoming
 
 
 @pytest.fixture

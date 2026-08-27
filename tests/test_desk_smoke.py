@@ -66,3 +66,51 @@ def test_clerk_search_proxied_under_lab_route():
     r = client.post("/lab/api/clerk-search", json={"party_name": "   "})
     assert r.status_code == 400, r.status_code
     assert r.json()["error"] == "invalid_request"
+
+
+# --- UI flow loop (Aug 26 2026 session) -------------------------------------------
+
+def test_underwriting_accepts_parcel_param():
+    r = client.get("/underwriting?parcel=4003592")
+    assert r.status_code == 200
+
+
+def test_offers_page_has_stage_draft_control():
+    r = client.get("/offers")
+    assert r.status_code == 200
+    assert 'id="of-stage"' in r.text, "Stage draft control missing"
+
+
+def test_parcels_carry_address_and_has_cpr():
+    r = client.get("/api/parcels")
+    assert r.status_code == 200
+    rows = r.json().get("parcels") or []
+    if not rows:
+        pytest.skip("pipeline register empty")
+    first = rows[0]
+    assert "address" in first and "has_cpr" in first
+
+
+@pytest.mark.skipif(not DEALS.exists(),
+                    reason="data/current_deals.json not present")
+def test_dossier_links_to_underwriting():
+    import json
+    rows = json.loads(DEALS.read_text(encoding="utf-8"))
+    pid = str(rows[0].get("parcel_id"))
+    r = client.get(f"/deals/{pid}")
+    assert r.status_code == 200
+    assert "Tune underwriting" in r.text
+    assert "/underwriting?parcel=" in r.text
+
+
+@pytest.mark.skipif(not DEALS.exists(),
+                    reason="data/current_deals.json not present")
+def test_parcels_cover_full_pipeline_book():
+    """Every current_deals.json row must appear in /api/parcels — selectors
+    pull the whole book, not just CPR-backed parcels."""
+    import json
+    rows = json.loads(DEALS.read_text(encoding="utf-8"))
+    pids = {str(r.get("parcel_id")) for r in rows if r.get("parcel_id")}
+    listed = {p["parcel_id"] for p in client.get("/api/parcels").json()["parcels"]}
+    missing = pids - listed
+    assert not missing, f"{len(missing)} register rows missing from /api/parcels"

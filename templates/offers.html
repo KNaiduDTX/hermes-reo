@@ -66,6 +66,7 @@
   <option value="{{ parcel or current_parcel or '4003592' }}">current parcel</option>
 </select>
 <button class="btn btn-secondary" type="button" id="of-copy"{% if not (engine_here or pb.on) %} disabled{% endif %}>Copy draft</button>
+<button class="btn btn-secondary" type="button" id="of-stage">Stage draft</button>
 <button class="btn btn-primary" type="button" disabled title="The desk drafts only — a human reviews and sends.">Send for review</button>
 <script>
 /* Audit UI-03 (P3): the parcel selector rendered one static option while the
@@ -77,12 +78,13 @@
   const cur = sel.value;
   fetch('/api/parcels').then(r => r.json()).then(j => {
     const parcels = (j && j.parcels) || [];
-    if (!parcels.length && !j.parcels) return;
+    if (!parcels.length) return;
     sel.innerHTML = '';
-    for (const p of (j.parcels || parcels)) {
+    for (const p of parcels) {
       const o = document.createElement('option');
       o.value = p.parcel_id;
-      o.textContent = p.parcel_id + (p.source ? ' (' + p.source + ')' : '');
+      o.textContent = (p.address ? p.address + ' · ' : '') + p.parcel_id +
+        (p.has_cpr ? '' : ' · register-only');
       if (p.parcel_id === cur) o.selected = true;
       sel.appendChild(o);
     }
@@ -259,6 +261,43 @@
       navigator.clipboard.writeText(text);
     }
   });
+
+  /* Audit UI-04: "Stage draft" persists the offer through the existing
+     draft-only endpoint (data/drafts/, human review required before anything
+     is sent). Register-only parcels (no saved CPR) answer 404 honestly. */
+  var stage = document.getElementById('of-stage');
+  if (stage) {
+    stage.addEventListener('click', function () {
+      var pid = new URLSearchParams(location.search).get('parcel') ||
+                '{{ parcel or current_parcel or "" }}';
+      if (!pid) { window.alert('No parcel selected.'); return; }
+      stage.disabled = true;
+      stage.textContent = 'staging…';
+      fetch('/lab/api/generate-offer', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ parcel_id: pid })
+      }).then(r => r.json().then(j => ({ ok: r.ok, status: r.status, j })))
+        .then(({ ok, status, j }) => {
+          stage.disabled = false;
+          stage.textContent = 'Stage draft';
+          if (!ok) {
+            window.alert('Stage failed (' + status + '): ' + (j.detail || 'unknown'));
+            return;
+          }
+          if (j.dead) {
+            window.alert('DEAD DEAL — no letter staged. Reason: ' + (j.reason || j.dead_reason || 'bid ceiling non-positive'));
+            return;
+          }
+          window.alert('Draft staged for human review:\n' + (j.path || j.draft_path || 'data/drafts/'));
+        })
+        .catch(e => {
+          stage.disabled = false;
+          stage.textContent = 'Stage draft';
+          window.alert('Stage failed: ' + e.message);
+        });
+    });
+  }
 })();
 </script>
 {% endblock %}

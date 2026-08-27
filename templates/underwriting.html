@@ -4,7 +4,9 @@
 
 {% block head_actions %}
 <button class="btn btn-secondary" type="button" id="btn-reset">Reset assumptions</button>
-<button class="btn btn-primary" type="button" id="btn-export">Export to Excel</button>
+<a class="btn btn-secondary" id="uw-dossier-link" href="/deals">Open dossier</a>
+<a class="btn btn-secondary" id="uw-offer-link" href="/offers">Draft offer</a>
+<button class="btn btn-primary" type="button" id="btn-export">Export CSV</button>
 {% endblock %}
 
 {% block body %}
@@ -352,7 +354,7 @@
           window.UW_ENGINE.applyDefaults(d);
         }
         renderLiveDeal(d);
-        statusEl.textContent = '';
+        restoreOverrides(pid); /* re-apply this parcel's tuned assumptions */
       })
       .catch(function (err) {
         if (token !== reqToken) return; /* superseded — never paint stale */
@@ -364,32 +366,51 @@
   }
 
   function loadParcels() {
-    getJSON('/api/valued-parcels')
+    /* Audit UI-flow: the selector now pulls the FULL pipeline book
+       (/api/parcels = every current_deals.json row), not just parcels that
+       happen to have a valued/CPR file. Register-only rows are marked so the
+       operator sees the difference; selecting one still tries /api/uw-defaults
+       and degrades honestly. ?parcel= deep-links work too. */
+    getJSON('/api/parcels')
       .then(function (data) {
         var parcels = (data && data.parcels) || [];
         if (!parcels.length) {
           sel.innerHTML = '';
-          statusEl.textContent = 'no valued deals on file';
+          statusEl.textContent = 'pipeline register empty';
           return;
         }
         sel.innerHTML = '';
         parcels.forEach(function (p) {
           var opt = document.createElement('option');
           opt.value = p.parcel_id;
-          opt.textContent = p.parcel_id + ' · ' + p.source;
-          opt.dataset.source = p.source;
+          opt.textContent = p.parcel_id + (p.address ? ' — ' + p.address : '') +
+            (p.has_cpr ? '' : ' · register-only');
+          opt.dataset.hasCpr = p.has_cpr ? '1' : '';
           sel.appendChild(opt);
         });
-        var pick = 0; /* default: first entry whose source is "valued" */
-        for (var i = 0; i < parcels.length; i++) {
-          if (parcels[i].source === 'valued') { pick = i; break; }
+        var wanted = new URLSearchParams(location.search).get('parcel');
+        var pick = 0;
+        if (wanted) {
+          for (var i = 0; i < parcels.length; i++) {
+            if (String(parcels[i].parcel_id) === wanted) { pick = i; break; }
+          }
         }
         sel.selectedIndex = pick;
         loadDefaults(sel.value);
+        syncLinks(sel.value);
       })
       .catch(function () {
         statusEl.textContent = 'parcel register unavailable';
       });
+  }
+
+  function syncLinks(pid) {
+    /* Close the flow loop: underwriting <-> dossier <-> offers for THIS parcel. */
+    var enc = encodeURIComponent(pid || '');
+    var d = document.getElementById('uw-dossier-link');
+    var o = document.getElementById('uw-offer-link');
+    if (d && pid) d.href = '/deals/' + enc;
+    if (o && pid) o.href = '/offers?parcel=' + enc;
   }
 
   function init() {
@@ -401,8 +422,55 @@
     netChip = document.getElementById('chip-net');
     roiChip = document.getElementById('chip-roi');
     if (!sel) return;
-    sel.addEventListener('change', function () { loadDefaults(sel.value); });
+    sel.addEventListener('change', function () {
+      loadDefaults(sel.value);
+      syncLinks(sel.value);
+    });
+    /* Audit UI-08: tuned assumptions persist per parcel (localStorage) and are
+       re-applied after every defaults load, so a tuned model survives
+       navigation. "Reset assumptions" clears them. */
+    sel.addEventListener('change', function () { restoreOverrides(sel.value); });
+    document.body.addEventListener('change', function (ev) {
+      var t = ev.target;
+      if (t && t.id && t.id.indexOf('in-') === 0 &&
+          typeof t.value === 'string' && sel.value) {
+        try {
+          var key = 'uw-overrides:' + sel.value;
+          var bag = JSON.parse(window.localStorage.getItem(key) || '{}');
+          if (t.value === '' || t.dataset.defaultValue === t.value) {
+            delete bag[t.id];
+          } else {
+            bag[t.id] = t.value;
+          }
+          window.localStorage.setItem(key, JSON.stringify(bag));
+        } catch (e) { /* storage unavailable — tuning stays session-only */ }
+      }
+    });
+    var resetBtn = document.getElementById('btn-reset');
+    if (resetBtn) resetBtn.addEventListener('click', function () {
+      try { window.localStorage.removeItem('uw-overrides:' + sel.value); } catch (e) {}
+      loadDefaults(sel.value);
+    });
     loadParcels();
+  }
+
+  /** Re-apply this parcel's saved overrides after a defaults repaint. */
+  function restoreOverrides(pid) {
+    if (!pid) return;
+    var bag;
+    try { bag = JSON.parse(window.localStorage.getItem('uw-overrides:' + pid) || '{}'); }
+    catch (e) { return; }
+    var n = 0;
+    Object.keys(bag).forEach(function (id) {
+      var el = document.getElementById(id);
+      if (el && typeof el.value === 'string') {
+        el.value = bag[id];
+        el.dispatchEvent(new Event('input', { bubbles: true }));
+        el.dispatchEvent(new Event('change', { bubbles: true }));
+        n++;
+      }
+    });
+    if (n) statusEl.textContent = n + ' tuned assumption(s) restored';
   }
 
   /* formula-engine.js registered its DOMContentLoaded boot first, so the

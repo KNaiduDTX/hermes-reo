@@ -329,8 +329,14 @@ def dossier(request: Request, parcel_id: str):
     from src.policy import MAO_FACTOR_DEFAULT, CLOSING_SELL_PCT
     from src.underwriting import flip_pnl
 
-    rehab = 50_000
-    arv_val = float(arv or 0) or money(pv("cad_appraised_value")) or 750_000
+    # Audit UI-07: pull what the pipeline already knows about this parcel from
+    # its register row instead of quoting hardcoded constants on every dossier.
+    deal_row = next((d for d in deals()
+                     if str(d.get("parcel_id") or "") == str(parcel_id)), None)
+    rehab = money((deal_row or {}).get("rough_rehab")) or 50_000
+    arv_val = float(arv or 0) \
+        or money(pv("cad_appraised_value")) \
+        or money((deal_row or {}).get("cad_value")) or 750_000
     mao = max(0.0, arv_val * MAO_FACTOR_DEFAULT - rehab)
     ceiling = compute_bid_ceiling(arv=arv_val, rehab=rehab,
                                   factor=MAO_FACTOR_DEFAULT, mao_val=mao)

@@ -8,6 +8,7 @@
 </select>
 <button class="btn btn-secondary" type="button" id="dossier-clerk-btn"
         title="Live read-only Collin clerk search by party name (draft posture)">Run clerk search</button>
+<a class="btn btn-secondary" href="/underwriting?parcel={{ parcel_id }}">Tune underwriting</a>
 <a class="btn btn-primary" href="/offers?parcel={{ parcel_id }}">Generate offer</a>
 <script>
 /* Audit UI-03: the clerk button was rendered dead since the desk launched —
@@ -37,15 +38,13 @@ document.getElementById('dossier-clerk-btn').addEventListener('click', function 
         'Instruments: ' + j.instrument_count,
         'Encumbrances: ' + j.encumbrance_count,
         (j.preview_truncated ? '(preview truncated)' : '')
-      ].filter(Boolean).join('
-');
+      ].filter(Boolean).join('\n');
       const first = (j.preview || [])[0];
       if (first) {
         lines.push('Most recent: ' + (first.instrument_date || first.date || 'n/a') +
                    ' — ' + (first.instrument_type || first.type || 'instrument'));
       }
-      window.alert(lines.join('
-'));
+      window.alert(lines.join('\n'));
     })
     .catch(e => {
       btn.disabled = false;
