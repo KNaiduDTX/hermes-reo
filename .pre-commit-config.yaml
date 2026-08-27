@@ -13,11 +13,7 @@ repos:
         language: system
         pass_filenames: false
         files: ^src/
-  - repo: local
-    hooks:
-      - id: unit-tests-pre-push
-        name: unit tests
-        entry: .venv/bin/python -m pytest -q
-        language: system
-        pass_filenames: false
-        stages: [pre-push]
+# Audit TEST-9: the unit-tests-pre-push entry below was dead config —
+# core.hooksPath=.githooks bypasses the pre-commit framework on push, and
+# .githooks/pre-push already runs pytest directly. Removed to keep one
+# source of truth per gate.

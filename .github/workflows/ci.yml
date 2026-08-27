@@ -28,6 +28,12 @@ jobs:
       - name: Lint (ruff — errors only)
         run: ruff check --select E9,F63,F7,F82,B006,B017 .
 
+      # Audit TEST-2: the workbook must build BEFORE pytest — out/ is
+      # gitignored, so tests/test_workbook_formulas.py (formula-string money-
+      # math gates) skipped silently whenever pytest ran first.
+      - name: Workbook build (before tests — formula gates need the artifact)
+        run: python build_workbook.py
+
       # FN6 coverage ratchet — ONLY-INCREASES: never lower this number; raise it as
       # coverage grows (measured baseline ~35%, gated one point above it). Local
       # mirror: `make coverage`.
@@ -39,9 +45,6 @@ jobs:
 
       - name: Offline fixture pipeline
         run: python pipeline.py --fixture
-
-      - name: Workbook build smoke
-        run: python build_workbook.py
 
       # Recalc verification runs locally via `make recalc` (needs LibreOffice).
 

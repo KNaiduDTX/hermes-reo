@@ -33,3 +33,29 @@ def test_verify_target_actually_enforces_the_ratchet():
     mk = (REPO / "Makefile").read_text(encoding="utf-8")
     verify = re.search(r"^verify:.*$", mk, re.M).group(0)
     assert "coverage" in verify, "verify no longer runs the coverage ratchet"
+
+
+def test_lockfile_covers_every_declared_requirement():
+    """TEST-8 regression: requirements-lock.txt was generated before jinja2
+    was pinned, so a clean `pip install -r requirements-lock.txt` missed a
+    hard dependency (CI caught it the hard way). The lock must be a superset
+    of requirements.txt at the same pinned versions."""
+    declared = {}
+    for line in (REPO / "requirements.txt").read_text(encoding="utf-8").splitlines():
+        line = line.strip()
+        if not line or line.startswith("#"):
+            continue
+        name, _, ver = line.partition("==")
+        if ver:
+            declared[name.strip().lower().replace("_", "-")] = ver.strip()
+    locked = {}
+    for line in (REPO / "requirements-lock.txt").read_text(encoding="utf-8").splitlines():
+        line = line.strip()
+        if "==" in line and not line.startswith("#"):
+            name, _, ver = line.partition("==")
+            locked[name.strip().lower().replace("_", "-")] = ver.strip()
+    missing = [n for n, v in declared.items()
+               if n not in locked or locked[n] != v]
+    assert not missing, (
+        f"requirements-lock.txt missing/pinning-drifted for: {missing} "
+        "— run 'make lock' after touching requirements.txt")
