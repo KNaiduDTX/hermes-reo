@@ -86,7 +86,10 @@ def test_uw_defaults_compute_for_every_valued_or_cad_parcel(book):
         assert payload["arv"] > 0
         assert "net_profit" in payload
         checked += 1
-    assert checked > 100  # most of the book has CAD-derived economics
+    # Book-size-relative (audit TEST-3): the synthetic CI book has 8 rows,
+    # the real book 166 — the requirement is that MOST rows derive economics,
+    # not a hardcoded count.
+    assert checked > len(book["rows"]) * 0.5, checked
 
 
 def test_offers_render_for_every_parcel(book):

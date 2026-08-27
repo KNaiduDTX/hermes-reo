@@ -48,6 +48,34 @@ jobs:
 
       # Recalc verification runs locally via `make recalc` (needs LibreOffice).
 
+  desk-e2e-synthetic:
+    # Audit TEST-3: the "every record -> CPR -> full desk" milestone skipped
+    # entirely in CI (data/ is gitignored). This job materializes a
+    # DETERMINISTIC, SYNTHETIC dataset (no PII - invented addresses at
+    # plausible TX geometry) so CI can run the whole-book desk validation
+    # against it, and the milestone claim is validated remotely too.
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+
+      - name: Materialize synthetic dataset (no PII)
+        run: python scripts/synth_dataset.py 8
+
+      - name: Generate the CPR store (desk routes read data/cprs/)
+        run: python -c "from src.cpr_store import generate_all; r = generate_all('data/current_deals.json', 'data/cprs'); assert r['failed'] == 0, r['failures'][:3]; print('CPR store:', r['ok'])"
+
+      - name: Whole-book desk validation over synthetic data
+        run: pytest tests/test_desk_e2e.py tests/test_desk_smoke.py
+
   weekly-live:
     # RL5: weekly live-portal smoke tier (county-site markup breakage alarm).
     # Deliberately a separate job so push/PR runs are unaffected; it only fires on
