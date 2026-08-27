@@ -763,8 +763,57 @@ def analyze_deal(cpr: CPR) -> dict:
     return mark_invalid_query(deal)
 
 
-def main() -> None:
+def _plan_drive_route(deals: list[dict], output_dir: str, max_stops: int) -> None:
+    """ORCH-2: expose the idle TSP planner over geocoded rows.
+
+    Builds RouteStops from geocoded deals (value-ranked), solves the
+    courthouse-anchored route, and writes data/route_plan.json + prints the
+    leg list. Geocode coverage limits stops - the plan says so honestly.
+    """
+    import json as _json
+    from src.adapters.route_optimizer import RouteStop, optimize_route
+
+    geocoded = [d for d in deals
+                if isinstance(d.get("latitude"), (int, float))
+                and isinstance(d.get("longitude"), (int, float))]
+    if not geocoded:
+        print("\n  ROUTE PLAN: no geocoded rows - run --geocode-backfill first")
+        return
+    ranked = sorted(geocoded, key=lambda d: (d.get("preliminary_mao") or 0),
+                    reverse=True)[:max(1, max_stops)]
+    stops = [RouteStop(title=str(d.get("parcel_id") or ""),
+                       address=str(d.get("address") or ""),
+                       city=str(d.get("city_norm") or d.get("city") or ""),
+                       lat=float(d["latitude"]), lng=float(d["longitude"]),
+                       category="Drive-by",
+                       value=float(d.get("preliminary_mao") or 0))
+             for d in ranked]
+    plan = optimize_route(stops)
+    if plan.get("error"):
+        print("  ROUTE PLAN failed: " + str(plan["error"]))
+        return
+    path = os.path.join(output_dir, "route_plan.json")
+    write_json(path, plan, default=str)
+    print(f"\n  ROUTE PLAN: {plan.get('total_stops', len(ranked))} stop(s), "
+          f"{plan.get('total_miles', '?')} mi -> {path}")
+    for s in plan.get("schedule", [])[:12]:
+        print(f"    {s.get('seq', '-')}. {s.get('title', '')} "
+              f"{s.get('address', '')}")
+
+
+def main(argv=None):
+    import argparse
     import logging
+    # Audit ORCH-2: find_deals previously exposed ZERO CLI flags (fixed
+    # limit=5 live scrape, env-var-only skip). Minimal, backward-compatible
+    # surface: --plan-route / --max-stops.
+    parser = argparse.ArgumentParser(prog="find_deals")
+    parser.add_argument("--plan-route", action="store_true",
+                        help="plan a TSP drive-by route over geocoded rows "
+                             "(writes data/route_plan.json)")
+    parser.add_argument("--max-stops", type=int, default=12,
+                        help="max stops in a --plan-route run (default 12)")
+    args = parser.parse_args(argv)
     logging.basicConfig(level=logging.INFO,
                         format="%(levelname)s %(name)s: %(message)s")
     print("=" * 70)
@@ -932,6 +981,48 @@ def main() -> None:
             print(f"  CPR store failures (first 3): {tally['failures'][:3]}")
     except Exception as exc:  # noqa: BLE001 — store refresh must not kill the ranking run
         print(f"  !! CPR store regeneration skipped: {exc!r}")
+
+    # Audit R-2: CRM-import-shaped lead CSV. One row per asset, dedupe key
+    # = Property ID; owner split for First/Last conventions; humans import
+    # the file by hand (draft-only posture intact - nothing is sent).
+    try:
+        import csv as _csv
+        crm_path = os.path.join(output_dir, "leads_crm.csv")
+        _crm_fields = ["First Name", "Last Name", "Street Address", "City",
+                       "State", "Zip", "Owner", "Source", "Cad Value",
+                       "Est Equity", "Blast Tier", "Lien Gate", "Val Gate",
+                       "Parcel ID", "Property ID"]
+        with open(crm_path, "w", newline="", encoding="utf-8") as fh:
+            w = _csv.DictWriter(fh, fieldnames=_crm_fields)
+            w.writeheader()
+            for d in deals:
+                owner = str(d.get("owner") or "").strip()
+                parts = owner.split(" ", 1) if owner else ["", ""]
+                w.writerow({
+                    "First Name": parts[0],
+                    "Last Name": parts[1] if len(parts) > 1 else "",
+                    "Street Address": str(d.get("address") or ""),
+                    "City": str(d.get("city_norm") or d.get("city") or ""),
+                    "State": "TX",
+                    "Zip": str(d.get("zip5") or ""),
+                    "Owner": owner,
+                    "Source": "HERMES-REO pipeline (public record)",
+                    "Cad Value": d.get("cad_value") or "",
+                    "Est Equity": d.get("equity_estimate") or "",
+                    "Blast Tier": d.get("blast_tier") or "",
+                    "Lien Gate": d.get("lien_gate") or "",
+                    "Val Gate": d.get("val_gate") or "",
+                    "Parcel ID": d.get("parcel_id") or "",
+                    "Property ID": d.get("property_id") or "",
+                })
+        print(f"  Saved: {crm_path} (CRM-import-shaped lead list)")
+    except OSError as exc:
+        print(f"  !! CRM lead export skipped: {exc!r}")
+
+    # Audit ORCH-2: the TSP drive-by planner (built, self-checked, zero
+    # callers) - plan a courthouse-anchored route over geocoded rows.
+    if args.plan_route:
+        _plan_drive_route(deals_payload, output_dir, args.max_stops)
 
     # Final summary
     print("\n" + "=" * 70)

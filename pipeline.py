@@ -180,6 +180,26 @@ class RunSummary:
         """Atomically persist the summary; returns its path."""
         payload = self.as_dict()
         write_json(self.path, payload)
+        # Audit ORCH-6: RUN_SUMMARY_PATH was a single overwritten file, so no
+        # run-to-run trend existed. Mirror each summary into an append-only
+        # daily sibling (FN2 pattern); best-effort, never fatal.
+        try:
+            history_dir = os.path.join(os.path.dirname(self.path), "run_history")
+            os.makedirs(history_dir, exist_ok=True)
+            day_file = os.path.join(history_dir,
+                                    self.now_fn().date().isoformat() + ".json")
+            entries = []
+            if os.path.exists(day_file):
+                try:
+                    loaded = json.loads(open(day_file, encoding="utf-8").read())
+                    if isinstance(loaded, list):
+                        entries = loaded
+                except (OSError, ValueError):
+                    entries = []
+            entries.append(payload)
+            write_json(day_file, entries)
+        except OSError as exc:
+            print(f"  (run-summary history append skipped: {exc!r})")
         print(f"\nRun summary [{payload['mode']}]: {self.path} "
               f"(duration {payload['duration_s']}s)")
         return self.path
@@ -1671,6 +1691,96 @@ def _mode_identity(args: argparse.Namespace) -> tuple[str, dict]:
     return "hint", {}  # bare invocation (handled before this in main())
 
 
+
+
+# --- ORCH-1/F8: transaction state machine CLI surface ---------------------
+# transaction.py was built and tested (24 cases) with zero production
+# callers - the post-offer machine and redemption calendar sat idle.
+
+def _locate_cpr_file(parcel: str) -> str | None:
+    """Find a saved CPR for *parcel*: data/cpr_<pid>.json, then the store."""
+    import glob
+
+    data_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), "data")
+    direct = os.path.join(data_dir, "cpr_" + parcel + ".json")
+    if os.path.exists(direct):
+        return direct
+    for path in sorted(glob.glob(os.path.join(data_dir, "cprs", "*.json"))):
+        try:
+            raw = json.loads(open(path, encoding="utf-8").read())
+        except (OSError, ValueError):
+            continue
+        known = [str(raw.get("parcel_id") or "")] + \
+                [str(x) for x in (raw.get("parcel_ids") or [])]
+        if parcel in known:
+            return path
+    return None
+
+
+def _tx_load(parcel: str):
+    """Locate + load a CPR for the tx CLI; returns (path, cpr)."""
+    from src import hitl
+
+    path = _locate_cpr_file(parcel)
+    if not path:
+        print("!! No saved CPR found for parcel " + repr(parcel) +
+              " (looked in data/cpr_<pid>.json and data/cprs/)")
+        return None, None
+    return path, hitl.load_cpr(path)
+
+
+def run_tx_status(parcel: str) -> int:
+    """ORCH-1: surface the transaction machine's view of one parcel."""
+    path, cpr = _tx_load(parcel)
+    if not path:
+        return exit_code_for("data_missing")
+    from src.transaction import (ALLOWED_TRANSITIONS, COLUMN_TO_STATE,
+                                 transaction_history)
+    from src.legal_rules import IRS_REDEMPTION_DAYS
+
+    print("")
+    print("TRANSACTION STATUS - " + str(cpr.parcel_id) + " (" + str(cpr.county) +
+          ") " + str(cpr.situs_address))
+    current = COLUMN_TO_STATE.get(cpr.column)
+    print("  Current state: " + (current.value if current else repr(cpr.column)))
+    for h in transaction_history(cpr):
+        print("    - " + h["state"] + " @ " + str(h["at"]) + " (by " + str(h["actor"]) + ")")
+    if current is not None:
+        allowed = sorted(s.value for s in ALLOWED_TRANSITIONS[current])
+        print("  Allowed next: " + ("none (terminal state)" if not allowed else str(allowed)))
+    dt = str(getattr(cpr, "deal_type", "") or "")
+    if dt in ("DT-TAXDEED", "DT-AUCTION"):
+        print("  Redemption: IRS " + str(IRS_REDEMPTION_DAYS) +
+              "-day window applies after a tax-sale deed")
+    return EXIT_OK
+
+
+def run_tx_advance(parcel: str, to_state: str, note: str) -> int:
+    """ORCH-1: apply one whitelisted transition and write the CPR back."""
+    path, cpr = _tx_load(parcel)
+    if not path:
+        return exit_code_for("data_missing")
+    from src.transaction import TransactionState, transition, transaction_history
+
+    try:
+        target = TransactionState(to_state.upper())
+    except ValueError:
+        valid = sorted(s.value for s in TransactionState)
+        print("!! Unknown transaction state " + repr(to_state) + "; known: " + str(valid))
+        return exit_code_for("usage")
+    try:
+        transition(cpr, target, actor=note or "desk-cli")
+    except ValueError as exc:
+        print("!! " + str(exc))
+        return exit_code_for("usage")
+    write_json(path, cpr.to_dict(), default=str)
+    print("  Advanced " + str(cpr.parcel_id) + " -> " + target.value +
+          "; CPR written: " + path)
+    for h in transaction_history(cpr)[-5:]:
+        print("    - " + h["state"] + " @ " + str(h["at"]) + " (by " + str(h["actor"]) + ")")
+    return EXIT_OK
+
+
 def main() -> None:
     # Library modules (src/**) log via logging; surface on stderr.
     logging.basicConfig(level=logging.INFO,
@@ -1713,6 +1823,15 @@ def main() -> None:
     parser.add_argument("--min-leads", type=int, default=0,
                         help="RL2: with --live, floor on leads found — exit 4 behind a "
                              "PORTAL-SHAPE-CHANGED banner when below it (0 disables)")
+    parser.add_argument("--tx-status", metavar="PARCEL",
+                        help="show a parcel's transaction state, history, "
+                             "allowed transitions and redemption calendar (ORCH-1)")
+    parser.add_argument("--tx-advance", nargs=2, metavar=("PARCEL", "STATE"),
+                        help="apply a whitelisted transaction transition "
+                             "(e.g. UNDER_CONTRACT OPTION_PERIOD) and write "
+                             "the CPR back atomically")
+    parser.add_argument("--tx-note", default="desk-cli",
+                        help="actor/note recorded on a --tx-advance ledger receipt")
     parser.add_argument("--force-dead-errors", action="store_true",
                         help="F10: with --live --county grayson, propagate known-dead-endpoint "
                              "fetch failures instead of degrading to zero leads")
@@ -1740,6 +1859,14 @@ def main() -> None:
             print("\n✗ Some checks failed — fix before proceeding.")
             sys.exit(1)
         print("✓ All checks passed.\n")
+
+    # ORCH-1: the tx CLI is a read/advance query — it runs before mode
+    # classification (it selects no data mode) and needs no run summary.
+    if args.tx_status:
+        sys.exit(run_tx_status(args.tx_status))
+    if args.tx_advance:
+        sys.exit(run_tx_advance(args.tx_advance[0], args.tx_advance[1],
+                                args.tx_note))
 
     mode_name, flags = _mode_identity(args)
     if mode_name == "hint":
