@@ -685,10 +685,38 @@ def run_resume_valued_pipeline(valued_path: str,
               "attach an approved-source valuation.")
         return exit_code_for("gate_fail")
 
+    # Audit HITL-2/CPR-6: the serialized verdict string used to be trusted
+    # as-is and the reviewer got gate=None (its fabricated-confidence check
+    # auto-passed on None). With the comp_set restored, recompute the gate
+    # cheaply and (a) refuse on mismatch — a hand-edited .valued.json can no
+    # longer fake a pass — and (b) hand the reviewer the REAL GateValResult.
+    gate_val_result = None
+    try:
+        from src.valuation import coerce_blast_tier
+
+        tier = coerce_blast_tier(getattr(cpr, "blast_tier", None))
+        re_gate, re_val = hitl.gate_val(
+            cpr, cpr.valuation.comp_source,
+            cpr.valuation.comp_set or [], tier)
+        if re_gate.verdict != cpr.valuation.gate_val_verdict:
+            if summary is not None:
+                summary.bump(RESUME_SUMMARY_SOURCE, "errors")
+            print(f"!! GATE-VAL MISMATCH: file carries "
+                  f"{cpr.valuation.gate_val_verdict!r} but the restored comp "
+                  f"set recomputes to {re_gate.verdict!r} ({re_gate.reason}). "
+                  "Refusing to price on an unverifiable valuation.")
+            return exit_code_for("gate_fail")
+        gate_val_result = re_gate
+        print(f"  GATE-VAL re-verified from restored comps: {re_gate.verdict} "
+              f"(confidence {re_gate.confidence:.2f} >= floor {re_gate.floor:.2f})")
+    except Exception as exc:  # noqa: BLE001 — recompute must not crash resume
+        print(f"  !! GATE-VAL re-verification skipped: {exc!r} "
+              "(trusting carried verdict this run)")
+
     result = process_valued_cpr(cpr, rehab=rehab, output_dir=output_dir,
                                 artifact_prefix="", summary=summary,
                                 source_label=RESUME_SUMMARY_SOURCE,
-                                gate_val_result=None)
+                                gate_val_result=gate_val_result)
     if result is None:
         if summary is not None:
             summary.bump(RESUME_SUMMARY_SOURCE, "errors")

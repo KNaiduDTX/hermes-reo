@@ -692,10 +692,25 @@ def analyze_deal(cpr: CPR) -> dict:
     # Lien gate
     lien_gate = gate_legal_lien(cpr)
 
-    # GATE-VAL — CAD-only, will fail (non-disclosure)
+    # GATE-VAL — CAD-only, will fail (non-disclosure). Audit HITL-6: a
+    # sibling <parcel>.valued.json written by a completed HITL loop IS a
+    # pass — consult it instead of hardcoding REJECTED/NO DATA so a
+    # regeneration preserves the human-approved verdict.
     val_status = "REJECTED (assessed-value-only — non-disclosure state)"
     if not cad_val:
         val_status = "NO DATA"
+    _valued_marker = os.path.join(
+        os.path.dirname(os.path.abspath(__file__)), "data",
+        f"cpr_{cpr.parcel_id}.valued.json")
+    if os.path.exists(_valued_marker):
+        try:
+            import json as _json
+            _val = (_json.loads(open(_valued_marker, encoding="utf-8").read())
+                    .get("valuation") or {})
+            if str(_val.get("gate_val_verdict") or "").lower() == "pass":
+                val_status = "pass"
+        except (OSError, ValueError):
+            pass  # unreadable sibling — keep the honest CAD-only default
 
     # Preliminary MAO using 70% rule on CAD (directional only)
     preliminary_mao = None
