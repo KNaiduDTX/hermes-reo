@@ -506,10 +506,48 @@ tiers include `adjusted_price` — raw comps cannot clear the floor.
 ## Dashboard
 
 ```bash
-.venv/bin/uvicorn server:app --port 8123   # then open http://127.0.0.1:8123
+make desk   # single command: Diligence Desk at http://127.0.0.1:8000
 ```
+The Diligence Desk serves the whole product from one process: Portfolio,
+Pipeline, Dossier, Map, Underwriting, Offers and System pages, with the
+legacy portfolio SPA mounted under `/lab/`. Every parcel selector pulls the
+full pipeline register; the dossier/underwriting/offers pages cross-link per
+parcel. Legacy SPA alone: `.venv/bin/uvicorn server:app --port 8123`.
 KPI cards, sortable deals table, Leaflet map of geocoded notices, portfolio
 stats — all reading the live dataset files on every request.
+
+## The daily operator loop (ORCH-8)
+
+The engine is deliberately a 4-command loop around ONE human seam (comp
+intake); chaining is the only manual part:
+
+1. `python find_deals.py` — dataset refresh, rankings, map, stats, CRM-ready
+   `data/leads_crm.csv`, and the saved CPR store for the whole book.
+   Optional: `--plan-route` plans a TSP drive-by route over geocoded rows.
+2. `pipeline.py --live --min-leads N` — scrape → enrich → CPR → gates →
+   GATE-VAL pause (every parcel needs human comps in a non-disclosure state).
+3. `python -m src.hitl --cpr ... --comps ...` — the human comp pull (≥3 comps
+   inside 0.5 mi, <180 days, approved source).
+4. `pipeline.py --resume-valued-dir data/` — price → memo → offer drafts →
+   `data/investor_pack.csv` → val_gate stamp. GATE-VAL is re-verified from
+   the restored comps; a mismatched file refuses rather than fabricating.
+
+Post-offer, drive the deal through the transaction machine from the CLI:
+`pipeline.py --tx-status <parcel>` (state, history, allowed transitions) and
+`pipeline.py --tx-advance <parcel> OPTION_PERIOD --tx-note "signed"`.
+
+## Snapshot & restore (TEST-4/RL6)
+
+`data/` is gitignored and holds the sole copies of hours of scraping (166
+CPRs, caches, comps DB, history). Run periodically:
+
+```bash
+make snapshot                      # -> ~/.hermes-reo-snapshots/<ts>.tar.gz + .sha256
+```
+
+Restore: untar the archive over the repo root (`tar -xzf <snapshot> -C .`),
+then verify against the manifest: `shasum -a 256 -c <ts>.sha256` (run from the
+repo root so the data/* relative paths resolve). Keep one copy off-machine.
 
 ## Git hooks
 

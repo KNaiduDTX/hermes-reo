@@ -6,7 +6,7 @@ RUFF     := .venv/bin/ruff
 SOFFICE  := /Applications/LibreOffice.app/Contents/MacOS/soffice
 XLSX     := out/HERMES-REO_Model_Suite.xlsx
 
-.PHONY: help setup lock lint lint-full test test-live coverage checks fixture build recalc desk verify ci-local all clean
+.PHONY: help setup lock lint lint-full test test-live coverage checks fixture build recalc desk snapshot verify ci-local all clean
 
 help:
 	@echo "make setup    - create venv + install pinned deps + playwright browser"
@@ -25,6 +25,7 @@ help:
 	@echo "make ci-local - exact CI parity: the gates CI runs (verify; recalc stays local)"
 	@echo "make all      - verify + recalc"
 	@echo "make desk     - Diligence Desk at :8000 (SPA under /lab/)"
+	@echo "make snapshot - checksummed archive of gitignored data/ (TEST-4)"
 
 setup:
 	python3 -m venv .venv
@@ -69,6 +70,11 @@ build:
 # legacy portfolio SPA mounted under /lab/.
 desk:
 	.venv/bin/uvicorn dashboard:app --host 127.0.0.1 --port 8000
+
+# Audit TEST-4/RL6: the only Wave item never executed. data/ holds sole
+# copies of hours of scraping; this writes a sha256-manifested archive.
+snapshot:
+	bash scripts/snapshot.sh
 
 recalc: build
 	$(SOFFICE) --headless -env:UserInstallation=file:///tmp/lo_hermes --calc --convert-to xlsx $(XLSX) --outdir out/recalc/
