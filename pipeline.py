@@ -1081,7 +1081,20 @@ def run_live_pipeline(county: str, limit: int, allow_gate_fail_demo: bool = Fals
     elif county == "dallas":
         from src.adapters.dallas_foreclosure import DallasForeclosureAdapter
         adapter = DallasForeclosureAdapter()
-        leads = adapter.fetch(limit=limit)
+        # Audit SCR-2: fetch() discarded the RL3 health report, so per-PDF
+        # failures and quarantines were invisible in live runs. Consume the
+        # report: loud banner + run-summary error counts.
+        leads, report = adapter.fetch_with_report(limit=limit)
+        report = report or {}
+        pdf_failures = report.get("pdf_failures") or []
+        pdf_quarantined = report.get("pdf_quarantined") or []
+        if pdf_failures or pdf_quarantined:
+            print(f"  !! Dallas PDF health: {len(pdf_failures)} failure(s), "
+                  f"{len(pdf_quarantined)} quarantined")
+            if summary is not None:
+                summary.bump(source_name, "errors",
+                             len(pdf_failures) + len(pdf_quarantined))
+        leads = leads
     elif county == "grayson":
         # F10: register the implemented-but-unwired Grayson tax-sale adapter
         # (src/adapters/grayson_tax.py). Its endpoints are dead by prior
@@ -1354,6 +1367,35 @@ def _run_bulk_dcad(summary: RunSummary | None = None) -> None:
         summary.bump(DCAD_SUMMARY_SOURCE, "no_data_found",
                      len(dallas_cprs) - updated)
         summary.bump(DCAD_SUMMARY_SOURCE, "enriched", updated)
+
+    # Audit SCR-4: the RL9 yield probe existed but nothing surfaced its
+    # numbers to operators. HERMES_DCAD_STATS opt-ins carry parse_stats in
+    # the cache; scan it and print parse yield + echo mix LOUDLY (parse
+    # decay otherwise shows up only as endless cache-miss re-searches).
+    # Print-only: the run-summary key catalog is fixed.
+    try:
+        cache_path = os.path.join(os.path.dirname(__file__),
+                                  "data", "dcad_cache.json")
+        cache_data = json.loads(open(cache_path, encoding="utf-8").read())
+        stats = [entry.get("parse_stats") for entry in cache_data.values()
+                 if isinstance(entry, dict)
+                 and isinstance(entry.get("parse_stats"), dict)]
+        if stats:
+            zero_yield = sum(1 for s in stats
+                             if not s.get("extracted_fields_count"))
+            echo_mix = {}
+            for s in stats:
+                q = s.get("echo_quality") or "unverifiable"
+                echo_mix[q] = echo_mix.get(q, 0) + 1
+            yield_pct = 100.0 * (len(stats) - zero_yield) / len(stats)
+            print(f"  DCAD parse yield: {len(stats) - zero_yield}/{len(stats)} "
+                  f"entries with parsed fields ({yield_pct:.0f}%); "
+                  f"echo mix: {echo_mix}")
+            if yield_pct < 50:
+                print("  !! DCAD parse yield below 50% — possible HTML/regex "
+                      "decay (RL9)")
+    except (OSError, ValueError):
+        pass  # cache unreadable — never fatal, stats are advisory
 
     # B2: write the enriched DCAD fields back into current_deals.json
     # atomically (unknown keys preserved; only falsy slots filled).

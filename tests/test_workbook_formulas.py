@@ -62,11 +62,13 @@ def test_no_cellis_containsText_rules_remain():
     assert not bad, f"invalid conditional formats remain: {bad}"
 
 
-def test_all_15_tabs_present():
+def test_all_16_tabs_present():
+    """Audit UW-6: the Short-Sale tab completes the deal-type coverage
+    (flip/BRRRR/rental/tax-deed/wholesale/subject-to/short-sale/auction)."""
     expected = {"README", "Assumptions", "Comp & ARV", "Rehab Estimator",
                 "Deal Screener", "Fix-and-Flip", "BRRRR", "Rental DCF",
                 "Tax-Deed", "Wholesale", "Auction Bid", "Subject-To",
-                "Sensitivity", "Portfolio", "Checks"}
+                "Short-Sale", "Sensitivity", "Portfolio", "Checks"}
     assert set(_wb().sheetnames) == expected
 
 
@@ -85,3 +87,20 @@ def test_subject_to_coc_denominator_includes_closing_costs():
     assert "B14/(B7+B9)" in formula, formula
     label = str(ws["A9"].value or "")
     assert "closing" in label.lower(), label
+
+
+def test_short_sale_patience_tax_mirrors_model():
+    """AUDIT UW-6: the tab must mirror short_sale_model - patience tax =
+    monthly hold x approval months, with the full monthly stack (utilities +
+    insurance + taxes) reconciled to the Fix-and-Flip holding convention."""
+    ws = _wb()["Short-Sale"]
+    assert str(ws["B13"].value) == "=B5*B12", ws["B13"].value  # months x monthly
+    assert "B6+B7" in str(ws["B12"].value)          # utilities + ins/taxes
+    assert "insurance_annual" in str(ws["B7"].value), ws["B7"].value
+
+
+def test_short_sale_annualizes_over_approval_window():
+    """AUDIT UW-6: annualized ROI scales by 12/approval_months (capital is
+    tied up through the approval window)."""
+    formula = str(_wb()["Short-Sale"]["B18"].value)
+    assert "*12/B5" in formula, formula

@@ -269,7 +269,20 @@ def download_pdf(url: str, local_dir: str,
         return write_bytes(local_path, payload)
     except ValueError:
         raise
-    except Exception:
+    except Exception as exc:
+        # Audit SCR-5: portal-down vs parser-broke used to be conflated in a
+        # bare except -> None. Transport-class failures (URLError/socket/
+        # HTTP 5xx) are re-raised as TransientSourceError so callers can
+        # retry-or-degrade by TYPE; a plain refusal stays a quiet None.
+        import socket
+        from ..errors import TransientSourceError
+        from urllib.error import URLError, HTTPError
+        if isinstance(exc, (URLError, socket.timeout, ConnectionError, TimeoutError)) \
+                or (isinstance(exc, OSError) and getattr(exc, "errno", None) is not None \
+                    and not isinstance(exc, FileNotFoundError)):
+            raise TransientSourceError(
+                f"{getattr(exc, '__class__', type(exc)).__name__} fetching {url}: "
+                f"{exc}", source="dallas_foreclosure") from exc
         return None
 
 

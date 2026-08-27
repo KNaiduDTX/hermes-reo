@@ -58,6 +58,7 @@ HEADLINE_CELLS = {
     "Auction Bid": [("B13", "Bid ceiling")],
     "Wholesale": [("B11", "Wholesale MAO"), ("B13", "Spread"), ("B24", "Compliance")],
     "Subject-To": [("B11", "Equity captured"), ("B15", "CoC")],
+    "Short-Sale": [("B13", "Patience holding"), ("B16", "Net profit"), ("B18", "Annualized ROI")],
 }
 
 

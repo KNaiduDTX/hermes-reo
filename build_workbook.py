@@ -1227,6 +1227,57 @@ def build_subject_to_tab(wb):
     print("Subject-To tab built")
 
 
+
+
+def build_short_sale_tab(wb):
+    """SHORT-SALE tab - lender-approval patience economics (audit UW-6).
+
+    Mirrors src.underwriting.short_sale_model: flip cost stack plus the
+    patience tax (monthly hold x approval months), annualized over the
+    approval window. The patience-tax row uses the FULL monthly stack
+    (utilities + insurance + taxes) to match the Fix-and-Flip tab
+    convention; the Python model utilities-only default is documented in
+    the note and overridden by callers that know their insurance/taxes.
+    """
+    ws = wb.create_sheet("Short-Sale")
+    col_widths(ws, {"A": 35, "B": 18})
+    header_row(ws, 1, "SHORT-SALE - Lender-Approval Patience Economics")
+
+    subheader(ws, 3, "INPUTS")
+    ws.cell(row=4, column=1).value = "Discounted payoff (purchase)"
+    set_input(ws, "B4", 300000, "Source: lender-approved discounted payoff", USD_FMT)
+    ws.cell(row=5, column=1).value = "Approval window (months)"
+    set_input(ws, "B5", 3, "Source: SHORT_SALE_APPROVAL_MONTHS_DEFAULT")
+    ws.cell(row=6, column=1).value = "Utilities $/mo (policy constant)"
+    set_input(ws, "B6", 200, "Source: policy.HOLDING_UTILITIES_MONTHLY", USD_FMT)
+    ws.cell(row=7, column=1).value = "Insurance + taxes $/mo (full stack)"
+    set_formula(ws, "B7", "=insurance_annual/12+tax_rate*arv_used/12", USD_FMT)
+    ws.cell(row=8, column=1).value = "ARV"
+    set_link(ws, "B8", "=IF(gate_val_pass,arv_used,\"GATE-VAL FAIL\")", USD_FMT)
+    ws.cell(row=9, column=1).value = "Rehab budget"
+    set_link(ws, "B9", "=rehab_used", USD_FMT)
+
+    subheader(ws, 11, "ANALYSIS")
+    ws.cell(row=12, column=1).value = "Patience tax $/mo (full monthly stack)"
+    set_formula(ws, "B12", "=B6+B7", USD_FMT)
+    ws.cell(row=13, column=1).value = "Total patience holding"
+    set_formula(ws, "B13", "=B5*B12", USD_FMT, bold=True)
+    ws.cell(row=14, column=1).value = "Rehab w/ contingency (20%)"
+    set_formula(ws, "B14", "=B9*1.2", USD_FMT)
+    ws.cell(row=15, column=1).value = "Cash invested"
+    set_formula(ws, "B15", "=B4+B14+B13", USD_FMT)
+    ws.cell(row=16, column=1).value = "Net profit"
+    set_formula(ws, "B16", "=IF(gate_val_pass,B8-B4-B14-B13,\"GATE-VAL FAIL\")", USD_FMT, bold=True)
+    ws.cell(row=17, column=1).value = "ROI (over approval window)"
+    set_formula(ws, "B17", "=IF(B15>0,B16/B15,0)", PCT_FMT)
+    ws.cell(row=18, column=1).value = "Annualized ROI (12-month clock)"
+    set_formula(ws, "B18", "=IF(B5>0,B17*12/B5,0)", PCT_FMT, bold=True)
+
+    subheader(ws, 20, "RISK FLAGS")
+    ws.cell(row=21, column=1).value = "Lender approval not guaranteed"
+    ws.cell(row=21, column=1).font = Font(bold=True, color="FF0000")
+
+    print("Short-Sale tab built")
 def build_sensitivity_tab(wb):
     """SENSITIVITY tab — 2-variable data table + scenario toggle + chart."""
     ws = wb.create_sheet("Sensitivity")
@@ -1517,6 +1568,7 @@ def main():
     build_wholesale_tab(wb)
     build_auction_bid_tab(wb)
     build_subject_to_tab(wb)
+    build_short_sale_tab(wb)
     build_sensitivity_tab(wb)
     build_portfolio_tab(wb)
     build_checks_tab(wb)
