@@ -17,20 +17,22 @@ from __future__ import annotations
 import re
 from .cpr import CPR, ProvenanceField, LienRecord, CPRColumn
 from .adapters.base import NormalizedLead
+from .coerce import to_int, to_float  # CPR-7: shared numeric contract
 
 
 def _parse_int(val) -> int | None:
-    if val is None or val == "Unknown":
-        return None
-    digits = re.sub(r'[^\d]', '', str(val))
-    return int(digits) if digits else None
+    """CPR-7: delegates to the shared coercion contract. The old
+    digit-stripping implementation turned "12.5" into 125 (digits collapsed
+    across the decimal point); the contract now parses the first numeric
+    token and rejects implausible ranges instead of concatenating digits."""
+    from .coerce import to_int
+    return to_int(val)
 
 
 def _parse_float(val) -> float | None:
-    if val is None or val == "Unknown":
-        return None
-    cleaned = re.sub(r'[^\d.]', '', str(val))
-    return float(cleaned) if cleaned else None
+    """CPR-7: delegates to the shared coercion contract."""
+    from .coerce import to_float
+    return to_float(val)
 
 
 def _parse_bool(val) -> bool:
@@ -76,13 +78,13 @@ def _enrich_common(cpr: CPR, details: dict, source: str, base_confidence: float)
     cpr.set_field("deed_number", prop.get("Deed Number", "Unknown"), source, base_confidence)
     cpr.set_field("commercial", _parse_bool(prop.get("Commercial", "False")), source, base_confidence)
 
-    # Improvement info — ALL fields
-    cpr.set_field("improvement_sqft", _parse_int(imp.get("Improvement Area")), source, base_confidence)
-    cpr.set_field("land_sqft", _parse_int(imp.get("Land Area")), source, base_confidence)
-    cpr.set_field("beds", _parse_int(imp.get("Bedrooms")), source, base_confidence)
-    cpr.set_field("baths", _parse_float(imp.get("Bathrooms")), source, base_confidence)
-    cpr.set_field("year_built", _parse_int(imp.get("Year Built")), source, base_confidence)
-    cpr.set_field("stories", _parse_int(imp.get("Stories")), source, base_confidence)
+    # Improvement info — ALL fields (CPR-7: implausible values -> None, never poisoned)
+    cpr.set_field("improvement_sqft", to_int(imp.get("Improvement Area"), lo=0, hi=100_000_000), source, base_confidence)
+    cpr.set_field("land_sqft", to_int(imp.get("Land Area"), lo=0, hi=100_000_000_000), source, base_confidence)
+    cpr.set_field("beds", to_int(imp.get("Bedrooms"), lo=0, hi=50), source, base_confidence)
+    cpr.set_field("baths", to_float(imp.get("Bathrooms"), lo=0, hi=30), source, base_confidence)
+    cpr.set_field("year_built", to_int(imp.get("Year Built"), lo=1800, hi=2100), source, base_confidence)
+    cpr.set_field("stories", to_int(imp.get("Stories"), lo=0, hi=20), source, base_confidence)
     cpr.set_field("pool", _parse_bool(imp.get("Pool", "N")), source, base_confidence)
 
     # Jurisdiction — taxing entities + ISD
@@ -92,7 +94,17 @@ def _enrich_common(cpr: CPR, details: dict, source: str, base_confidence: float)
 
     # Owner info
     cpr.set_field("owner_name", owner.get("Name", "Unknown"), source, base_confidence)
-    cpr.set_field("owner_mailing_address", owner.get("Address", "Unknown"), source, base_confidence)
+    owner_mailing = owner.get("Address") or "Unknown"
+    cpr.set_field("owner_mailing_address", owner_mailing, source, base_confidence)
+    # Audit R-1: the absentee signal was declared (cpr.py) and rendered (UI)
+    # but never populated. With CAD owner-mailing + situs in hand the signal
+    # is computable: mailing != situs (both real) -> absentee. "Unknown"
+    # mailing stays absent (no fabrication).
+    situs = str(getattr(cpr, "situs_address", "") or "").strip()
+    if isinstance(owner.get("Address"), str) and situs \
+            and owner["Address"] != "Unknown":
+        same = owner["Address"].strip().lower() == situs.lower()
+        cpr.set_field("absentee", not same, source, base_confidence)
 
     # Tax info — BOTH years
     cpr.set_field("cad_appraised_value", _parse_float(tax.get("Appraised Value (2026)")), source, base_confidence)
@@ -271,16 +283,16 @@ def cross_reference_dcad(cpr: CPR) -> CPR:
 
     if result.get("status") in ("parsed",) and "error" not in result:
         if result.get("improvement_sqft"):
-            cpr.set_field("improvement_sqft", _parse_int(result["improvement_sqft"]),
+            cpr.set_field("improvement_sqft", to_int(result["improvement_sqft"], lo=0, hi=100_000_000),
                           "dallas_cad", 0.90)
         if result.get("beds"):
-            cpr.set_field("beds", _parse_int(result["beds"]), "dallas_cad", 0.90)
+            cpr.set_field("beds", to_int(result["beds"], lo=0, hi=50), "dallas_cad", 0.90)
         if result.get("baths"):
-            cpr.set_field("baths", _parse_float(result["baths"]), "dallas_cad", 0.90)
+            cpr.set_field("baths", to_float(result["baths"], lo=0, hi=30), "dallas_cad", 0.90)
         if result.get("year_built"):
-            cpr.set_field("year_built", _parse_int(result["year_built"]), "dallas_cad", 0.90)
+            cpr.set_field("year_built", to_int(result["year_built"], lo=1800, hi=2100), "dallas_cad", 0.90)
         if result.get("cad_appraised_value"):
-            cpr.set_field("cad_appraised_value", _parse_float(result["cad_appraised_value"]),
+            cpr.set_field("cad_appraised_value", to_float(result["cad_appraised_value"], lo=0, hi=1e12),
                           "dallas_cad", 0.90)
         cpr.set_field("dcad_cross_ref_needed", False, "dallas_cad", 1.0)
 
