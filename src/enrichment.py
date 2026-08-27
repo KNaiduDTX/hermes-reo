@@ -72,10 +72,27 @@ def _enrich_common(cpr: CPR, details: dict, source: str, base_confidence: float)
     ocr = details.get("scanned_notice_ocr_data", {})
     census = details.get("census_demographics", {})
 
-    # Property info — ALL fields
-    cpr.set_field("property_type", prop.get("Type", "Unknown"), source, base_confidence)
-    cpr.set_field("legal_description", prop.get("Legal Description", "Unknown"), source, base_confidence)
-    cpr.set_field("deed_number", prop.get("Deed Number", "Unknown"), source, base_confidence)
+    # Audit CPR-4: string fields used to store the literal "Unknown" AS a
+    # confident fact (rendered in memos/UIs as if sourced). A missing value
+    # is now ABSENT (field skipped) — downstream renders it as "—", which is
+    # the honest state. ISD still derives (its "Unknown" is a computed
+    # verdict, not an echo of a missing input).
+    def _real(val):
+        """True when a detail value carries real information."""
+        if val is None:
+            return False
+        s = str(val).strip()
+        return s not in ("", "Unknown", "unknown", "N/A", "0")
+
+    prop_type = prop.get("Type")
+    if _real(prop_type):
+        cpr.set_field("property_type", prop_type, source, base_confidence)
+    legal_desc = prop.get("Legal Description")
+    if _real(legal_desc):
+        cpr.set_field("legal_description", legal_desc, source, base_confidence)
+    deed_num = prop.get("Deed Number")
+    if _real(deed_num):
+        cpr.set_field("deed_number", deed_num, source, base_confidence)
     cpr.set_field("commercial", _parse_bool(prop.get("Commercial", "False")), source, base_confidence)
 
     # Improvement info — ALL fields (CPR-7: implausible values -> None, never poisoned)
@@ -88,22 +105,25 @@ def _enrich_common(cpr: CPR, details: dict, source: str, base_confidence: float)
     cpr.set_field("pool", _parse_bool(imp.get("Pool", "N")), source, base_confidence)
 
     # Jurisdiction — taxing entities + ISD
-    taxing = jur.get("Taxing Entities", "Unknown")
-    cpr.set_field("taxing_entities", taxing, source, base_confidence)
-    cpr.set_field("isd", _extract_isd(taxing), source, base_confidence)
+    taxing = jur.get("Taxing Entities")
+    if _real(taxing):
+        cpr.set_field("taxing_entities", taxing, source, base_confidence)
+        cpr.set_field("isd", _extract_isd(taxing), source, base_confidence)
 
-    # Owner info
-    cpr.set_field("owner_name", owner.get("Name", "Unknown"), source, base_confidence)
-    owner_mailing = owner.get("Address") or "Unknown"
-    cpr.set_field("owner_mailing_address", owner_mailing, source, base_confidence)
+    # Owner info (CPR-4: Unknown names/addresses are absent, not facts)
+    owner_name = owner.get("Name")
+    if _real(owner_name):
+        cpr.set_field("owner_name", owner_name, source, base_confidence)
+    owner_mailing = owner.get("Address")
+    if _real(owner_mailing):
+        cpr.set_field("owner_mailing_address", owner_mailing, source, base_confidence)
     # Audit R-1: the absentee signal was declared (cpr.py) and rendered (UI)
     # but never populated. With CAD owner-mailing + situs in hand the signal
     # is computable: mailing != situs (both real) -> absentee. "Unknown"
     # mailing stays absent (no fabrication).
     situs = str(getattr(cpr, "situs_address", "") or "").strip()
-    if isinstance(owner.get("Address"), str) and situs \
-            and owner["Address"] != "Unknown":
-        same = owner["Address"].strip().lower() == situs.lower()
+    if _real(owner_mailing) and situs:
+        same = str(owner_mailing).strip().lower() == situs.lower()
         cpr.set_field("absentee", not same, source, base_confidence)
 
     # Tax info — BOTH years

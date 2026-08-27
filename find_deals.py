@@ -119,14 +119,26 @@ def merge_prior_enrichment(deals: list[dict], prior_path: str) -> list[dict]:
         if not prior:
             continue
         carried_here = 0
+        carried_fields = []
         for field_name in ENRICHMENT_CARRY_FORWARD_FIELDS:
             if _enrichment_field_is_empty(fresh.get(field_name)) and \
                     not _enrichment_field_is_empty(prior.get(field_name)):
                 fresh[field_name] = prior[field_name]
                 carried_here += 1
+                carried_fields.append(field_name)
         if carried_here:
             records_merged += 1
             fields_carried += carried_here
+            # Audit CPR-8: a 2025-scraped cad_value used to be
+            # indistinguishable from a fresh scrape once carried forward.
+            # Stamp WHICH fields were carried and FROM WHICH prior snapshot
+            # date (row-level; per-field stamps would bloat every row).
+            prior_date = str(prior.get("scraped_at")
+                             or prior.get("carried_from") or "prior-dataset")
+            stamps = set(fresh.get("carried_fields") or [])
+            stamps.update(carried_fields)
+            fresh["carried_fields"] = sorted(stamps)
+            fresh["carried_from"] = prior_date
 
     print(f"  Merge-on-write: {records_merged}/{len(deals)} refreshed record(s), "
           f"{fields_carried} enrichment field(s) carried forward from prior "
