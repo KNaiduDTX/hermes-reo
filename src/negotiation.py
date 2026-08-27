@@ -68,6 +68,63 @@ POSTURES = {
             "I don't want to show financial hardship": "The lender needs to see hardship to approve. We can help you prepare the package — it's confidential.",
         },
     },
+    # Audit UW-4: these six types silently inherited the bank-owned REO
+    # script (an on-market owner is not a distressed seller); each now gets
+    # honest framing. REO remains the last-resort default.
+    "DT-WHOLESALE": {
+        "name": "wholesale (investor-to-investor)",
+        "framing": "clean assignable contract, transparent assignment fee",
+        "key_message": "I'm an investor reselling this contract. My assignment fee is disclosed up front; you get a clear, written number and a fast close.",
+        "objections": {
+            "What's your assignment fee?": "Disclosed in writing before we sign — typically $5-15k on this size of deal. Transparency is the whole model.",
+            "Why not buy it yourself?": "Assignment keeps my capital free; you still get the same contract price and timeline. If you'd rather I close, I can double-close with full disclosure.",
+        },
+    },
+    "DT-ONMARKET": {
+        "name": "on-market seller",
+        "framing": "convenience and certainty vs a retail listing",
+        "key_message": "No listing period, no showings, no repairs, no agent commission wait. Net comparison: our cash number minus zero fees versus your expected net after 5-6% commission and 30-60 days.",
+        "objections": {
+            "I can get more on the open market": "Possibly — after commission, closing concessions, and 45+ days of showings. Net-net, most sellers keep 90-94% of retail. Our number is 91-97% of that, today.",
+            "Is this a lowball offer?": "It's the arithmetic of certainty: no financing fallout, no inspection renegotiation, no 45-day wait. You can compare it side by side with a net-listing sheet.",
+        },
+    },
+    "DT-OFFMARKET": {
+        "name": "off-market owner",
+        "framing": "no-pressure, direct, private",
+        "key_message": "I buy directly, privately, as-is. No listing, no strangers through the house, no commissions. If the numbers work for you, we can close on your timeline.",
+        "objections": {
+            "How did you get my information?": "Public county records — ownership and tax status are public record. I reach out respectfully; a simple no is a complete answer.",
+            "I wasn't planning to sell": "Many owners aren't — until they see a clean cash number. If the number doesn't work, keep it for reference; markets change.",
+        },
+    },
+    "DT-SUBTO": {
+        "name": "subject-to (existing loan stays in place)",
+        "framing": "transparent about the transfer mechanics",
+        "key_message": "We take title subject to your existing mortgage — the payment stays current automatically, your credit is protected, and you walk away from the payment obligation today.",
+        "objections": {
+            "What happens to my loan?": "It stays in your name; we make every payment on time via a documented servicing arrangement. The transfer may give the lender a due-on-sale option — we disclose that risk to you in writing before contracting.",
+            "Is this even legal?": "Yes — taking title subject-to an existing mortgage is a standard, disclosed transfer. You'll see the exact mechanics in the contract, and your attorney is welcome to review everything.",
+        },
+    },
+    "DT-RENTAL": {
+        "name": "tired landlord",
+        "framing": "exit from management burden",
+        "key_message": "We buy rental properties as-is, with tenants in place, no repairs, and no vacancy wait. You exchange a management headache for cash.",
+        "objections": {
+            "I'd get more listing it vacant": "Maybe, after vacancy, make-ready, turnover, and 60-90 days. Our number is net of all of that, closed on your date, tenants handled.",
+            "What about my tenants?": "We honor existing leases and security deposits to the letter — no eviction surprise dumped on you or them.",
+        },
+    },
+    "DT-BRRRR": {
+        "name": "BRRRR acquisition (retail-quality buy box)",
+        "framing": "verified-buy-box purchase, no distressed-seller pressure",
+        "key_message": "We buy to renovate and hold long term — clean, fast, financed close with no contingency ladder. The numbers only work for both of us at a fair price, so we won't waste your time.",
+        "objections": {
+            "Your offer is below comps": "Comps assume retail condition and timelines. Ours prices today's condition plus the cost and time of the work — that spread is the business.",
+            "Why should I care about your strategy?": "You shouldn't beyond this: cash, as-is, your timeline, no financing contingency.",
+        },
+    },
 }
 
 

@@ -155,12 +155,31 @@ def test_posture_playbook_selected_per_deal_type(deal_type, expected_posture):
 
 
 def test_unknown_deal_type_defaults_to_bank_owned_playbook():
-    package = _package("DT-ONMARKET")
+    # Audit UW-4: DT-ONMARKET used to be the "unknown" example here because
+    # it HAD no playbook and silently inherited the bank-owned script. It has
+    # its own honest framing now; the fallback is asserted on a truly
+    # unknown type.
+    package = _package("DT-NOT-A-REAL-TYPE")
     default_playbook = get_posture("DT-NOT-A-REAL-TYPE")
 
     assert package.seller_posture == "bank-owned"
     assert default_playbook is POSTURES["DT-REO"]
     assert default_playbook["framing"] == "condition and DOM leverage"
+
+
+def test_every_deal_type_has_its_own_playbook():
+    """UW-4: no live deal type silently inherits the distressed-seller REO
+    script. Only truly unknown types fall back to it."""
+    from src.legal_rules import DealType
+    from src.negotiation import POSTURES
+
+    for member in DealType:
+        posture = POSTURES.get(member.value)
+        if member is DealType.REO:
+            continue  # REO owns that script outright
+        assert posture is not None, member.value + " has no playbook"
+        assert posture is not POSTURES["DT-REO"], \
+            member.value + " inherits the bank-owned script"
 
 
 def test_ladder_multipliers_stay_out_of_negotiation_playbooks():

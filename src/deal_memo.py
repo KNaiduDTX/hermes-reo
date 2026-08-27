@@ -261,15 +261,61 @@ def _render_pricing(lines: list, pricing: PricingResult) -> None:
 
 
 def _render_exit(lines: list, cpr: CPR, underwrite: UnderwriteResult) -> None:
-    """Section 7 — Exit & disposition plan."""
+    """Section 7 — Exit & disposition plan.
+
+    Audit UW-8: SHORT/SUBTO/RENTAL/BRRRR used to get the generic
+    "fix-and-flip or BRRRR" line. Audit R-5: the three exit models are all
+    built — the memo now shows them side by side at the memo's own
+    ARV/purchase basis instead of a single-model exit narrative.
+    """
     lines.append("## Exit & Disposition Plan")
     lines.append(f"- **Exit strategy:** {underwrite.model}")
-    if cpr.deal_type == "DT-WHOLESALE":
-        lines.append("- **Disposition:** assign contract to end buyer (requires bilateral disclosure)")
-    elif cpr.deal_type == "DT-TAXDEED":
-        lines.append("- **Disposition:** hold through redemption → quiet-title → sell/refi")
-    else:
-        lines.append("- **Disposition:** fix-and-flip or BRRRR")
+    dt = str(getattr(cpr, "deal_type", "") or "")
+    disposition = {
+        "DT-WHOLESALE": "assign contract to end buyer (requires bilateral disclosure)",
+        "DT-TAXDEED": "hold through redemption → quiet-title → sell/refi",
+        "DT-SHORT": "lender-approved sale — patience path; expect 60-120 days approval",
+        "DT-SUBTO": "take title subject-to the existing loan (disclose due-on-sale risk)",
+        "DT-RENTAL": "hold as long-term rental — cap rate / DSCR drive the decision",
+        "DT-BRRRR": "renovate → lease → cash-out refi to recycle capital",
+    }.get(dt, "fix-and-flip (retail resale) or hold via BRRRR refi")
+    lines.append(f"- **Disposition:** {disposition}")
+
+    # R-5: side-by-side exit comparison at the memo's own economics.
+    try:
+        arv = float(underwrite.arv or 0)
+        purchase = float(underwrite.purchase_price or 0)
+        rehab = float(underwrite.rehab or 0)
+        if arv > 0 and purchase > 0 and underwrite.cash_invested:
+            from .underwriting import brrrr_recycle, rental_metrics
+
+            brr = brrrr_recycle(arv, purchase, rehab)
+            rent_est = round(arv * 0.006)          # 0.6%/mo rent convention
+            tax_est = arv * 0.022                   # TX county-average rate
+            rent = rental_metrics(price=purchase, rent_monthly=rent_est,
+                                  taxes_annual=tax_est,
+                                  equity_invested=purchase + rehab)
+            lines.append("")
+            lines.append("### Side-by-side exit comparison (same ARV/purchase basis)")
+            lines.append("")
+            lines.append("| Strategy | Cash in | Net / Recycled | Return |")
+            lines.append("|---|---|---|---|")
+            lines.append(f"| Fix-and-flip | ${underwrite.cash_invested:,.0f} | "
+                         f"${underwrite.net_profit:,.0f} net | {underwrite.roi:.1%} |")
+            lines.append(f"| BRRRR refi | ${brr.cash_invested:,.0f} all-in | "
+                         f"${brr.net_profit:,.0f} recycled "
+                         f"({brr.roi * 100:.0f}% of all-in) | {brr.roi:.1%} |")
+            coc = rent.cash_on_cash
+            lines.append(f"| Rental hold (rent est ${rent_est:,}/mo) | "
+                         f"${(purchase + rehab):,.0f} equity | "
+                         f"cap {(rent.cap_rate or 0):.1%} | "
+                         f"{'—' if coc is None else format(coc, '.1%')} cash-on-cash |")
+            lines.append("")
+            lines.append("_Rental row is illustrative: rent estimated at 0.6%/mo of ARV "
+                         "and taxes at 2.2%/yr — tune per property in the workbook "
+                         "before acting._")
+    except Exception:  # noqa: BLE001 — comparison is additive, never fatal
+        pass
     lines.append("")
 
 

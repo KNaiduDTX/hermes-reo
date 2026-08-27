@@ -36,6 +36,12 @@ class DealType(str, Enum):
     WHOLESALE = "DT-WHOLESALE"
     ONMARKET = "DT-ONMARKET"
     OFFMARKET = "DT-OFFMARKET"
+    # Audit UW-7: these three were previously bare strings (underwriting.py
+    # stamped a literal "DT-SUBTO"), so a misspelled deal_type survived
+    # enrichment/pricing and only exploded later at route_underwrite.
+    SUBTO = "DT-SUBTO"
+    RENTAL = "DT-RENTAL"
+    BRRRR = "DT-BRRRR"
 
 
 # --- R1: Mortgage Foreclosure (non-judicial trustee sale) ---
