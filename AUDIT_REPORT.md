@@ -331,3 +331,17 @@ Every record in the book now has a saved, reloadable CPR (data/cprs/, keyed by d
 **Gates:** make ci-local ALL GREEN at every wave commit. New suites: test_coerce (24), test_tx_cli (7), test_gate_parity (2), test_synthesis (3), + regenerated memo goldens under the frozen clock.
 
 **Still open (verified, source-blocked or larger builds):** UW-6 Short-Sale workbook tab, CPR-4 details-path Unknown-as-fact (partial via coercion), CPR-8 carried-field provenance stamps, SCR-2 health-report propagation, SCR-4 DCAD stats aggregation, SCR-5 typed-error generalization, R-3 alt-channel registry spike, R-4 deed-transfer comp suggester, HITL-4 radius comp seeding, HITL-5 comps endpoint, UI-05 desk-e2e depth, TEST-2 CI workbook-formula ordering, TEST-3 synthetic-dataset CI job, TEST-7 route-optimizer behavioral pins, TEST-8 venv/lockfile convergence, TEST-9 dead pre-push config.
+
+# SOURCE-BLOCKED CLOSURE — Aug 27, 2026 (waves A-E)
+
+| Wave | Commit | Closed |
+|---|---|---|
+| A | 29c2455 | TEST-2 (CI builds the workbook BEFORE pytest - formula gates no longer skip remotely) - TEST-8 (lockfile refreshed + version-exact superset meta-test) - TEST-9 (dead pre-push framework entry removed) |
+| B | bbda428 | UW-6 (SHORT-SALE tab, 16 tabs - full-stack patience tax reconciled to the flip-tab convention; formula asserts; recalc headline cells) - SCR-2 (Dallas live runs consume the RL3 health report) - SCR-4 (DCAD parse-yield + echo mix report in --bulk-dcad; <50% yield alarms) - SCR-5 (download_pdf transport failures typed as TransientSourceError) |
+| C | 25e11c5 | CPR-4 (Unknown no longer stored as a confident fact - missing values are absent, downstream renders dashes) - CPR-8 (merge stamps carried_fields + carried_from on every refreshed row; fresher data still wins) |
+| D | 26cf5cd | HITL-4 (comps.suggest_nearby_seeds: geocoded radius scan, SUGGESTIONS ONLY, exposed as hitl --suggest-radius) - HITL-5 (GET /api/comps/{parcel} + SPA comps chip; contract map updated) - TEST-7 (route_optimizer behavioral pins) - R-3 (alt-channel registry spike: UNVERIFIED probate/eviction/code-violation rows x3 counties) |
+| E | eae55d3 | TEST-3 (scripts/synth_dataset.py + ci.yml desk-e2e-synthetic job - the E2E milestone now validated remotely; generator anti-clobber guard) - UI-05 (uw-defaults assertion made book-size-relative) |
+
+**Incident (transparency):** during Wave E development the synth generator briefly overwrote the local data/current_deals.json; restored fully (166 rows incl. val_gate stamps and geocodes) from the FN2 history store, then added a structural anti-clobber guard - the generator now REFUSES to overwrite any dataset containing non-SYN parcel ids. The FN2 history spine proving its worth is itself the TEST-4 argument.
+
+**Gates:** make ci-local ALL GREEN at every wave commit. New suites: test_gate_parity (3), test_coerce (24), test_tx_cli (7), test_synthesis (3), test_route_optimizer (9), test_cpr8_stamps (3). CI gains a desk-e2e-synthetic job.
